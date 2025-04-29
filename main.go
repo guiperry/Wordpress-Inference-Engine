@@ -3,7 +3,6 @@ package main
 import (
 	"fmt" // Import fmt
 	"log"
-	"os"
 
 	"Inference_Engine/inference"
 	"Inference_Engine/ui"
@@ -15,6 +14,8 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/joho/godotenv"
+
+	"Inference_Engine/wordpress"
 )
 
 func main() {
@@ -30,6 +31,7 @@ func main() {
 
 	// Initialize the consolidated inference service
 	inferenceService := inference.NewInferenceService()
+	wpService := wordpress.NewWordPressService()
 
 	// Try to start the service with the default provider (e.g., cerebras)
 	if err := inferenceService.Start(); err != nil {
@@ -40,102 +42,17 @@ func main() {
 		log.Printf("Inference service started with provider: %s", inferenceService.GetActiveProviderName())
 	}
 
-	// Create the Content Manager view
+	// Create views
 	contentManagerView := ui.NewContentManagerView(inferenceService, w)
+	contentGeneratorView := ui.NewContentGeneratorView(wpService, inferenceService, w)
+	inferenceSettingsView := ui.NewInferenceSettingsView(inferenceService, w)
+	wordpressSettingsView := ui.NewWordPressSettingsView(wpService, w)
 
-	// --- Settings Tab ---
-	providerOptions := []string{"cerebras", "openai"} // Add more registered providers here
-	providerSelect := widget.NewSelect(providerOptions, func(selectedProvider string) {
-		log.Printf("UI: Provider selection changed to: %s", selectedProvider)
-		err := inferenceService.SwitchToProvider(selectedProvider)
-		if err != nil {
-			log.Printf("UI Error: Failed to switch provider: %v", err)
-			dialog.ShowError(err, w)
-			// Optionally reset dropdown to the actual active provider if switch failed
-			// providerSelect.SetSelected(inferenceService.GetActiveProviderName())
-		} else {
-			log.Printf("UI: Switched provider successfully to %s", selectedProvider)
-			// Update UI elements that depend on the provider if necessary
-		}
-	})
-	// Set initial selection based on the service's state after Start()
-	providerSelect.SetSelected(inferenceService.GetActiveProviderName())
-
-	// API Key Inputs (remain similar)
-	openaiKeyEntry := widget.NewPasswordEntry()
-	openaiKeyEntry.SetPlaceHolder("OpenAI API Key (optional, loaded from env)")
-	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
-		openaiKeyEntry.SetText(key)
-		openaiKeyEntry.Disable() // Indicate it's loaded from env
-	}
-	saveOpenAIButton := widget.NewButton("Set OpenAI Key Env Var", func() {
-		key := openaiKeyEntry.Text
-		if key != "" {
-			os.Setenv("OPENAI_API_KEY", key)
-			dialog.ShowInformation("Restart Required", "OpenAI API key environment variable set.\nPlease restart the application for the change to take full effect.", w)
-			openaiKeyEntry.Disable()
-		}
-	})
-	// Allow enabling if disabled
-	openaiKeyEntry.OnChanged = func(_ string) {
-		if openaiKeyEntry.Disabled() {
-			openaiKeyEntry.Enable()
-		}
-	}
-
-	cerebrasKeyEntry := widget.NewPasswordEntry()
-	cerebrasKeyEntry.SetPlaceHolder("Cerebras API Key (optional, loaded from env)")
-	if key := os.Getenv("CEREBRAS_API_KEY"); key != "" {
-		cerebrasKeyEntry.SetText(key)
-		cerebrasKeyEntry.Disable() // Indicate it's loaded from env
-	}
-	saveCerebrasButton := widget.NewButton("Set Cerebras Key Env Var", func() {
-		key := cerebrasKeyEntry.Text
-		if key != "" {
-			os.Setenv("CEREBRAS_API_KEY", key)
-			dialog.ShowInformation("Restart Required", "Cerebras API key environment variable set.\nPlease restart the application for the change to take full effect.", w)
-			cerebrasKeyEntry.Disable()
-		}
-	})
-	// Allow enabling if disabled
-	cerebrasKeyEntry.OnChanged = func(_ string) {
-		if cerebrasKeyEntry.Disabled() {
-			cerebrasKeyEntry.Enable()
-		}
-	}
-
-	// Model Selection (Example - could be dynamic based on provider)
-	modelEntry := widget.NewEntry()
-	modelEntry.SetPlaceHolder("Enter model name (e.g., gpt-4, llama-4-scout-17b-16e-instruct)")
-	modelEntry.SetText(inferenceService.GetCurrentModel()) // Set initial model
-
-	setModelButton := widget.NewButton("Set Model", func() {
-		model := modelEntry.Text
-		if model == "" {
-			dialog.ShowInformation("Info", "Please enter a model name.", w)
-			return
-		}
-		err := inferenceService.SetModel(model)
-		if err != nil {
-			dialog.ShowError(err, w)
-		} else {
-			dialog.ShowInformation("Success", fmt.Sprintf("Model set to '%s'", model), w)
-		}
-	})
-
-	settingsContainer := container.NewVBox(
-		widget.NewLabel("Inference Settings"),
-		widget.NewLabel("Model Provider:"),
-		providerSelect,
-		widget.NewLabel("Model Name:"),
-		modelEntry,
-		setModelButton,
+	// Combine settings views
+	combinedSettings := container.NewVBox(
+		inferenceSettingsView.Container(),
 		widget.NewSeparator(),
-		widget.NewLabel("API Keys (Set Environment Variable & Restart):"),
-		openaiKeyEntry,
-		saveOpenAIButton,
-		cerebrasKeyEntry,
-		saveCerebrasButton,
+		wordpressSettingsView.Container(),
 	)
 
 	// --- Test Tab ---
@@ -203,9 +120,10 @@ func main() {
 
 	// --- Main Tabs ---
 	tabs := container.NewAppTabs(
-		container.NewTabItem("Content Manager", contentManagerView.Container()),
-		container.NewTabItem("Settings", settingsContainer),
-		container.NewTabItem("Test Inference", testContainer), // Added Test tab
+		container.NewTabItem("Manager", contentManagerView.Container()),
+		container.NewTabItem("Generator", contentGeneratorView.Container()),
+		container.NewTabItem("Settings", combinedSettings),
+		container.NewTabItem("Test Inference", testContainer),
 	)
 
 	// Ensure the service is stopped cleanly on exit

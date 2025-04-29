@@ -15,26 +15,26 @@ import (
 
 // ContentManagerView represents the WordPress content manager view
 type ContentManagerView struct {
-	container        *container.Split
+	container        fyne.CanvasObject
 	wpService        *wordpress.WordPressService
 	inferenceService *inference.InferenceService
 	window           fyne.Window
 
-	// Connection UI elements
-	siteURLEntry    *widget.Entry
-	usernameEntry   *widget.Entry
-	passwordEntry   *widget.Entry
-	connectButton   *widget.Button
+	// Status UI element
 	statusLabel     *widget.Label
 
 	// Content UI elements
 	pageList        *widget.List
 	contentEditor   *widget.Entry
 	saveButton      *widget.Button
+	loadContentButton *widget.Button
 	
 	// Data
 	pages           wordpress.PageList
 	selectedPageID  int
+	
+	// Reference to content generator view (will be set after creation)
+	contentGeneratorView *ContentGeneratorView
 }
 
 // NewContentManagerView creates a new WordPress content manager view
@@ -52,21 +52,8 @@ func NewContentManagerView(inferenceService *inference.InferenceService, window 
 
 // initialize initializes the content manager view
 func (v *ContentManagerView) initialize() {
-	// Create connection UI elements
-	v.siteURLEntry = widget.NewEntry()
-	v.siteURLEntry.SetPlaceHolder("WordPress Site URL (e.g., https://example.com/)")
-	
-	v.usernameEntry = widget.NewEntry()
-	v.usernameEntry.SetPlaceHolder("Username")
-	
-	v.passwordEntry = widget.NewPasswordEntry()
-	v.passwordEntry.SetPlaceHolder("Application Password")
-	
-	v.connectButton = widget.NewButton("Connect", func() {
-		v.connectToWordPress()
-	})
-	
-	v.statusLabel = widget.NewLabel("Status: Disconnected")
+	// Create status label
+	v.statusLabel = widget.NewLabel("Wordpress Site Status: Disconnected")
 	
 	// Create content UI elements
 	v.pageList = widget.NewList(
@@ -98,19 +85,12 @@ func (v *ContentManagerView) initialize() {
 	})
 	v.saveButton.Disable() // Disable until a page is selected
 	
-	// Create layout
-	connectionForm := container.NewVBox(
-		widget.NewLabel("WordPress Connection"),
-		widget.NewLabel("Site URL:"),
-		v.siteURLEntry,
-		widget.NewLabel("Username:"),
-		v.usernameEntry,
-		widget.NewLabel("Application Password:"),
-		v.passwordEntry,
-		v.connectButton,
-		v.statusLabel,
-	)
+	v.loadContentButton = widget.NewButton("Load to Generator", func() {
+		v.loadContentToGenerator()
+	})
+	v.loadContentButton.Disable() // Disable until a page is selected
 	
+	// Create layout
 	contentContainer := container.NewVSplit(
 		container.NewBorder(
 			widget.NewLabel("Pages:"),
@@ -119,55 +99,24 @@ func (v *ContentManagerView) initialize() {
 		),
 		container.NewBorder(
 			widget.NewLabel("Content:"),
-			container.NewHBox(v.saveButton),
+			container.NewHBox(v.saveButton, v.loadContentButton),
 			nil, nil,
 			container.NewScroll(v.contentEditor),
 		),
 	)
 	contentContainer.SetOffset(0.3) // 30% for page list, 70% for content editor
 	
-	// Main layout
-	v.container = container.NewHSplit(
-		connectionForm,
+	// Main layout with status label at top
+	v.container = container.NewBorder(
+		v.statusLabel,
+		nil,
+		nil,
+		nil,
 		contentContainer,
 	)
-	v.container.SetOffset(0.25) // 25% for connection form, 75% for content
 }
 
-// connectToWordPress connects to the WordPress site
-func (v *ContentManagerView) connectToWordPress() {
-	siteURL := v.siteURLEntry.Text
-	username := v.usernameEntry.Text
-	password := v.passwordEntry.Text
-	
-	if siteURL == "" || username == "" || password == "" {
-		dialog.ShowError(fmt.Errorf("please fill in all connection fields"), v.window)
-		return
-	}
-	
-	// Show progress dialog
-	progress := dialog.NewProgressInfinite("Connecting", "Connecting to WordPress site...", v.window)
-	progress.Show()
-	
-	// Connect in a goroutine to avoid blocking the UI
-	go func() {
-		defer progress.Hide()
-		
-		err := v.wpService.Connect(siteURL, username, password)
-		if err != nil {
-			log.Printf("Error connecting to WordPress: %v", err)
-			dialog.ShowError(fmt.Errorf("failed to connect: %w", err), v.window)
-			v.statusLabel.SetText("Status: Connection failed")
-			return
-		}
-		
-		// Update status
-		v.statusLabel.SetText("Status: Connected")
-		
-		// Fetch pages
-		v.fetchPages()
-	}()
-}
+
 
 // fetchPages fetches the list of pages from the WordPress site
 func (v *ContentManagerView) fetchPages() {
@@ -228,6 +177,7 @@ func (v *ContentManagerView) loadPageContent(pageID int) {
 		v.contentEditor.SetText(content)
 		v.selectedPageID = pageID
 		v.saveButton.Enable()
+		v.loadContentButton.Enable()
 
 	}() // End of goroutine
 }
@@ -271,6 +221,48 @@ func (v *ContentManagerView) savePageContent() {
 			dialog.ShowInformation("Success", "Page content saved successfully", v.window)
 		}() // End of goroutine
 	}, v.window)
+}
+
+// loadContentToGenerator loads the current page content to the content generator
+func (v *ContentManagerView) loadContentToGenerator() {
+	if v.selectedPageID < 0 {
+		dialog.ShowError(fmt.Errorf("no page selected"), v.window)
+		return
+	}
+	
+	if v.contentGeneratorView == nil {
+		dialog.ShowError(fmt.Errorf("content generator view not initialized"), v.window)
+		return
+	}
+	
+	// Get the selected page
+	var selectedPage *wordpress.Page
+	for i, page := range v.pages {
+		if page.ID == v.selectedPageID {
+			selectedPage = &v.pages[i]
+			break
+		}
+	}
+	
+	if selectedPage == nil {
+		dialog.ShowError(fmt.Errorf("selected page not found"), v.window)
+		return
+	}
+	
+	// Add the content to the generator
+	v.contentGeneratorView.AddSourceContent(
+		selectedPage.Title,
+		v.contentEditor.Text,
+		"WordPress",
+		selectedPage.ID,
+	)
+	
+	dialog.ShowInformation("Success", fmt.Sprintf("Added '%s' to content generator", selectedPage.Title), v.window)
+}
+
+// SetContentGeneratorView sets the reference to the content generator view
+func (v *ContentManagerView) SetContentGeneratorView(generatorView *ContentGeneratorView) {
+	v.contentGeneratorView = generatorView
 }
 
 // Container returns the container for the content manager view

@@ -30,10 +30,10 @@ This implementation plan outlines the major steps, components, and consideration
 ```go
 // --- Main Tabs ---
 	tabs := container.NewAppTabs(
-		// container.NewTabItem("Content Manager", contentManagerView.Container()),
-		// container.NewTabItem("Editor", widget.NewLabel("Edit Content")), // Add back when implemented
-		// container.NewTabItem("Generation", widget.NewLabel("Content Generation Content")), // Add back when implemented
-		// container.NewTabItem("Page Preview", ui.PageView(w, inferenceService).CreateRenderer().Objects()[0]), // Instantiate the view
+		// container.NewTabItem("Manager", contentManagerView.Container()),
+		// container.NewTabItem("Generator", widget.NewLabel("Content Generator")), // Add back when implemented
+        // container.NewTabItem("Editor", widget.NewLabel("Edit Content")), // Add back when implemented
+		// container.NewTabItem("Preview", ui.PageView(w, inferenceService).CreateRenderer().Objects()[0]), // Instantiate the view
 		// container.NewTabItem("Automated CRM", widget.NewLabel("Automated CRM")), // Add back when implemented
 		container.NewTabItem("Settings", settingsContainer), // Already Implemented
 		container.NewTabItem("Test Inference", testContainer), // Already Implemented
@@ -45,8 +45,11 @@ This implementation plan outlines the major steps, components, and consideration
 *   **Goal:** Use the existing `InferenceService` to generate new content based on the selected WordPress page.
 *   **Tasks:**
     *   **Add "Generate Content" UI:**
-        *   Add a button like "Generate New Content with AI" to the "WordPress Manager" tab.
-        *   (Optional) Add a small input field for a prompt/topic hint for the AI.
+        *   Add a button like "Generate New Content with AI" to the "Generator" tab.
+        *   Add a small input field for a prompt/topic keywords for the AI.
+        *   Add a list of pages loaded from the content manager to be used as source content.
+        *   Add an upload file button to add files as source content.
+        *   Add a "Generate" button.
     *   **Update WordPress Service/UI Logic:**
         *   When "Generate Content" is clicked:
             *   Get the currently selected page's content (or use the prompt hint).
@@ -55,16 +58,17 @@ This implementation plan outlines the major steps, components, and consideration
             *   On success, populate the content editor `widget.Entry` with the AI-generated response.
             *   Allow the user to review/edit the generated content before saving it using the existing "Save Content" button.
 
-**Phase 3: AI-Driven "Redesign" (Content Replacement)**
+**Phase 3: AI-Driven Content Replacement**
 
-*   **Goal:** Streamline the process: select a page, click "Redesign", AI generates content, and updates the page automatically.
+*   **Goal:** Streamline the process: select a page, click "Replace", AI generates content, and updates the page automatically.
 *   **Tasks:**
-    *   **Add "AI Redesign" UI:**
-        *   Add a button like "Redesign Page with AI".
+    *   **Add "AI Replace" UI:**
+        *   Add a button like "Replace Page Content with AI" to the "Content Manager" tab.
+        
     *   **Combine Generation & Update Logic:**
-        *   When "AI Redesign" is clicked:
+        *   When "AI Replace" is clicked:
             *   Get the selected page ID and its current content.
-            *   Show a progress dialog ("Redesigning... Fetching content... Generating... Updating...").
+            *   Show a progress dialog ("Replacing... Fetching content... Generating... Updating...").
             *   Construct the generation prompt.
             *   Call `InferenceService.GenerateText`.
             *   On successful generation, immediately call `WordPressService.UpdatePageContent` with the generated content.
