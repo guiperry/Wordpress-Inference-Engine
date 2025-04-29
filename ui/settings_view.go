@@ -12,32 +12,32 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/widget"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/widget"
 )
 
 // WordPressSettingsView represents the WordPress settings view
 type WordPressSettingsView struct {
-	container        *fyne.Container
-	wpService        *wordpress.WordPressService
-	window           fyne.Window
+	container *fyne.Container
+	wpService *wordpress.WordPressService
+	window    fyne.Window
 
 	// Connection UI elements
-	siteNameEntry   *widget.Entry
-	siteURLEntry    *widget.Entry
-	usernameEntry   *widget.Entry
-	passwordEntry   *widget.Entry
-	rememberCheck   *widget.Check
-	connectButton   *widget.Button
-	statusLabel     *widget.Label
+	siteNameEntry *widget.Entry
+	siteURLEntry  *widget.Entry
+	usernameEntry *widget.Entry
+	passwordEntry *widget.Entry
+	rememberCheck *widget.Check
+	connectButton *widget.Button
+	statusLabel   *widget.Label
 
 	// Saved sites UI elements
-	savedSitesList  *widget.List
-	loadSiteButton  *widget.Button
+	savedSitesList   *widget.List
+	loadSiteButton   *widget.Button
 	deleteSiteButton *widget.Button
 
 	// Data
-	savedSites      []wordpress.SavedSite
+	savedSites        []wordpress.SavedSite
 	selectedSiteIndex int
 
 	// Callback for when connection status changes
@@ -47,10 +47,10 @@ type WordPressSettingsView struct {
 // NewWordPressSettingsView creates a new WordPress settings view
 func NewWordPressSettingsView(wpService *wordpress.WordPressService, window fyne.Window) *WordPressSettingsView {
 	view := &WordPressSettingsView{
-		wpService:        wpService,
-		window:           window,
-		savedSites:       []wordpress.SavedSite{},
-		selectedSiteIndex: -1,
+		wpService:           wpService,
+		window:              window,
+		savedSites:          []wordpress.SavedSite{},
+		selectedSiteIndex:   -1,
 		onConnectionChanged: func(connected bool) {},
 	}
 	view.initialize()
@@ -132,16 +132,16 @@ func (v *WordPressSettingsView) initialize() {
 		nil, // Top
 		// Buttons go at the bottom of this inner border layout
 		container.NewHBox(layout.NewSpacer(), v.loadSiteButton, v.deleteSiteButton),
-		nil, // Left
-		nil, // Right
+		nil,              // Left
+		nil,              // Right
 		v.savedSitesList, // List goes in the center
 	)
-	
+
 	savedSitesContainer := container.NewBorder(
-		widget.NewLabel("Saved Sites"), // Top
-		nil,                            // Bottom
-		nil,                            // Left
-		nil,                            // Right
+		widget.NewLabel("Saved Sites"),         // Top
+		nil,                                    // Bottom
+		nil,                                    // Left
+		nil,                                    // Right
 		container.NewScroll(savedSitesContent), // Center <-- The scrollable part now expands
 	)
 
@@ -188,7 +188,7 @@ func (v *InferenceSettingsView) initialize() {
 			// log.Printf("UI: Provider selection callback triggered for current provider '%s', ignoring.", selectedProvider) // Optional: Add a log for debugging if needed
 			return
 		}
-		
+
 		log.Printf("UI: Provider selection changed to: %s", selectedProvider)
 		err := v.inferenceService.SwitchToProvider(selectedProvider)
 		if err != nil {
@@ -279,9 +279,14 @@ func (v *InferenceSettingsView) initialize() {
 	)
 }
 
-// Container returns the container for the settings view
+// Container returns the container for the Inference Settings view
 // This method was added to fix the error in main.go
 func (v *InferenceSettingsView) Container() fyne.CanvasObject {
+	return v.container
+}
+
+// Container returns the container for the WordPress Settings view
+func (v *WordPressSettingsView) Container() fyne.CanvasObject {
 	return v.container
 }
 
@@ -292,55 +297,138 @@ func (v *WordPressSettingsView) connectToWordPress() {
 	username := v.usernameEntry.Text
 	password := v.passwordEntry.Text
 	remember := v.rememberCheck.Checked
+	log.Printf("connectToWordPress: Initiated for URL: %s, User: %s", siteURL, username) // Log start
 
 	if siteURL == "" || username == "" || password == "" {
+		log.Println("connectToWordPress: Missing connection fields.")
 		dialog.ShowError(fmt.Errorf("please fill in all connection fields"), v.window)
 		return
 	}
 
+	// --- Update Status Immediately ---
+	log.Println("connectToWordPress: Updating status to Connecting and disabling button.")
+	v.statusLabel.SetText("Status: Connecting...")
+	v.statusLabel.Refresh()   // Ensure UI updates
+	v.connectButton.Disable() // Disable button during connection attempt
+
 	// Show progress dialog
+	log.Println("connectToWordPress: Showing progress dialog.")
 	progress := dialog.NewProgressInfinite("Connecting", "Connecting to WordPress site...", v.window)
 	progress.Show()
 
-	// Connect in a goroutine to avoid blocking the UI
-	go func() {
-		defer progress.Hide()
+	// Use a channel to signal completion and pass the error back
+	done := make(chan error)
+	log.Println("connectToWordPress: Created 'done' channel.")
 
+	// --- Connection Goroutine ---
+	log.Println("connectToWordPress: Starting connection goroutine.")
+	// This goroutine ONLY performs the network call.
+	go func() {
+		log.Println("connectToWordPress (goroutine): Started.")
+		log.Printf("connectToWordPress (goroutine): Calling wpService.Connect for URL: %s", siteURL)
+		// Perform the connection attempt. The service now has a timeout.
 		err := v.wpService.Connect(siteURL, username, password)
-		if err != nil {
-			log.Printf("Error connecting to WordPress: %v", err)
-			dialog.ShowError(fmt.Errorf("failed to connect: %w", err), v.window)
-			v.statusLabel.SetText("Status: Connection failed")
-			v.onConnectionChanged(false)
+		log.Printf("connectToWordPress (goroutine): wpService.Connect finished. Error: %v", err)
+		// Check if channel is still open before sending
+		// (Could be closed if main UI context is gone, though less likely here)
+		log.Println("connectToWordPress (goroutine): Attempting to send result to 'done' channel.")
+		select {
+		case done <- err: // Send the result (nil or error) back
+		log.Println("connectToWordPress (goroutine): Successfully sent result to 'done' channel.")
+		default:
+			// Channel closed or blocked, log if necessary
+			log.Println("connectToWordPress (goroutine): 'done' channel blocked or closed before sending.")
+		}
+		log.Println("connectToWordPress (goroutine): Closing 'done' channel.")
+		close(done) // Close channel once done
+		log.Println("connectToWordPress (goroutine): Finished.")
+
+	}()
+
+	// --- UI Update Handling ---
+	log.Println("connectToWordPress: Starting UI update handling goroutine.")
+	go func() {
+		log.Println("connectToWordPress (UI goroutine): Started. Waiting for result from 'done' channel.")
+		err, ok := <-done // Receive the result from the connection goroutine
+		log.Printf("connectToWordPress (UI goroutine): Received from 'done' channel. Error: %v, OK: %t", err, ok)
+
+		if !ok {
+			// Channel was closed without sending a value, unusual case
+			log.Println("connectToWordPress (UI goroutine): 'done' channel closed unexpectedly.")
+			// Attempt cleanup just in case
+			log.Println("connectToWordPress (UI goroutine): Hiding progress (unexpected close).")
+			progress.Hide()
+			log.Println("connectToWordPress (UI goroutine): Enabling connect button (unexpected close).")
+			v.connectButton.Enable()
+			log.Println("connectToWordPress (UI goroutine): Setting status to Error (unexpected close).")
+			v.statusLabel.SetText("Status: Error (Connection Aborted)")
+			v.statusLabel.Refresh()
+			log.Println("connectToWordPress (UI goroutine): Finished (unexpected close).")
 			return
 		}
 
-		// Update status
+		// --- All UI updates happen here, after the network call is done ---
+		log.Println("connectToWordPress (UI goroutine): Hiding progress.")
+		progress.Hide()          // Hide progress first
+		log.Println("connectToWordPress (UI goroutine): Enabling connect button.")
+		v.connectButton.Enable() // Re-enable button
+
+		if err != nil {
+			log.Printf("connectToWordPress (UI goroutine): Connection failed. Error: %v", err)
+			v.statusLabel.SetText(fmt.Sprintf("Status: Connection failed (%s)", err.Error()))
+			v.statusLabel.Refresh()
+			log.Println("connectToWordPress (UI goroutine): Showing error dialog.")
+			dialog.ShowError(fmt.Errorf("failed to connect: %w", err), v.window)
+			if v.onConnectionChanged != nil {
+				log.Println("connectToWordPress (UI goroutine): Calling onConnectionChanged(false).")
+				v.onConnectionChanged(false)
+			}
+			log.Println("connectToWordPress (UI goroutine): Finished (error path).")
+			return // Exit this UI update goroutine
+		}
+
+		// Success path
+		log.Println("connectToWordPress (UI goroutine): Connection successful.")
 		v.statusLabel.SetText("Status: Connected")
-		v.onConnectionChanged(true)
+		v.statusLabel.Refresh()
+		if v.onConnectionChanged != nil {
+			log.Println("connectToWordPress (UI goroutine): Calling onConnectionChanged(true).")
+			v.onConnectionChanged(true)
+		}
 
 		// Save site if remember is checked
 		if remember {
-			if siteName == "" {
-				// Use domain as site name if not provided
-				u, err := url.Parse(siteURL)
-				if err == nil && u != nil {
-					siteName = u.Host
+			log.Println("connectToWordPress (UI goroutine): 'Remember Me' checked. Proceeding to save.")
+			effectiveSiteName := siteName
+			if effectiveSiteName == "" {
+				u, parseErr := url.Parse(siteURL)
+				if parseErr == nil && u != nil {
+					effectiveSiteName = u.Host
 				} else {
-					siteName = "WordPress Site"
+					effectiveSiteName = "WordPress Site" // Fallback
 				}
+				log.Printf("connectToWordPress (UI goroutine): Generated effective site name: %s", effectiveSiteName)
+				v.siteNameEntry.SetText(effectiveSiteName)
+				// v.siteNameEntry.Refresh() // Refresh might be needed
 			}
 
-			err := v.wpService.SaveSite(siteName, siteURL, username, password)
-			if err != nil {
-				log.Printf("Error saving site: %v", err)
-				dialog.ShowError(fmt.Errorf("failed to save site: %w", err), v.window)
+			log.Printf("connectToWordPress (UI goroutine): Calling wpService.SaveSite for name: %s", effectiveSiteName)
+			saveErr := v.wpService.SaveSite(effectiveSiteName, siteURL, username, password)
+			if saveErr != nil {
+				log.Printf("connectToWordPress (UI goroutine): Error saving site: %v", saveErr)
+				dialog.ShowError(fmt.Errorf("connection successful, but failed to save site: %w", saveErr), v.window)
 			} else {
-				v.refreshSavedSites()
+				log.Println("connectToWordPress (UI goroutine): Site saved successfully. Refreshing saved sites list.")
+				v.refreshSavedSites() // Refresh list after successful save
 			}
+		} else {
+			log.Println("connectToWordPress (UI goroutine): 'Remember Me' not checked. Skipping save.")
 		}
-	}()
-}
+		log.Println("connectToWordPress (UI goroutine): Finished (success path).")
+	}() // End of UI update handling goroutine
+	log.Println("connectToWordPress: Exiting main function.")
+} // End of connectToWordPress
+
 
 // refreshSavedSites refreshes the list of saved sites
 func (v *WordPressSettingsView) refreshSavedSites() {
@@ -374,7 +462,7 @@ func (v *WordPressSettingsView) loadSavedSite() {
 	v.rememberCheck.SetChecked(true)
 
 	// Connect automatically
-	v.connectToWordPress()
+	//v.connectToWordPress()
 }
 
 // deleteSavedSite deletes a saved site
@@ -415,7 +503,4 @@ func (v *WordPressSettingsView) UpdateConnectionStatus(connected bool) {
 	}
 }
 
-// Container returns the container for the WordPress settings view
-func (v *WordPressSettingsView) Container() fyne.CanvasObject {
-	return v.container
-}
+

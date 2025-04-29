@@ -38,10 +38,41 @@ type ContentManagerView struct {
 	contentGeneratorView *ContentGeneratorView
 }
 
+// RefreshStatus updates the status label based on the current service connection state.
+func (v *ContentManagerView) RefreshStatus() {
+	if v.wpService == nil {
+		log.Println("ContentManagerView: WordPress service is nil, cannot refresh status.")
+		v.statusLabel.SetText("Status: Error (Service unavailable)")
+		return
+	}
+
+	if v.wpService.IsConnected() {
+		siteName := v.wpService.GetCurrentSiteName() // Assuming you add a method like this to your service
+		if siteName == "" {
+			siteName = "Connected Site" // Fallback if name isn't stored/retrieved
+		}
+		v.statusLabel.SetText(fmt.Sprintf("Status: Connected to %s", siteName))
+		// Optionally, trigger fetching pages if connected and list is empty
+		// if len(v.pages) == 0 {
+		//     go v.fetchPages() // Fetch in background
+		// }
+	} else {
+		v.statusLabel.SetText("Status: Disconnected")
+		// Clear page list if disconnected
+		v.pages = nil
+		v.pageList.Refresh()
+		v.contentEditor.SetText("")
+		v.saveButton.Disable()
+		v.loadContentButton.Disable()
+	}
+	v.statusLabel.Refresh()
+}
+
+
 // NewContentManagerView creates a new WordPress content manager view
-func NewContentManagerView(inferenceService *inference.InferenceService, window fyne.Window) *ContentManagerView {
+func NewContentManagerView(wpService *wordpress.WordPressService, inferenceService *inference.InferenceService, window fyne.Window) *ContentManagerView {
 	view := &ContentManagerView{
-		wpService:        wordpress.NewWordPressService(),
+		wpService:        wpService,
 		inferenceService: inferenceService,
 		window:           window,
 		pages:            wordpress.PageList{},
@@ -54,7 +85,7 @@ func NewContentManagerView(inferenceService *inference.InferenceService, window 
 // initialize initializes the content manager view
 func (v *ContentManagerView) initialize() {
 	// Create status label
-	v.statusLabel = widget.NewLabel("Wordpress Site Status: Disconnected")
+	v.statusLabel = widget.NewLabel("Wordpress Connection Status: Initializing...")
 	
 	// Create content UI elements
 	v.pageList = widget.NewList(
@@ -115,6 +146,7 @@ func (v *ContentManagerView) initialize() {
 		nil,
 		contentContainer,
 	)
+	v.RefreshStatus()
 }
 
 

@@ -6,23 +6,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // WordPressService manages the interaction with a WordPress site via the REST API
 type WordPressService struct {
-	siteURL      string
-	username     string
-	appPassword  string
-	client       *http.Client
-	isConnected  bool
-	mutex        sync.Mutex
-	savedSites   []SavedSite
+	siteURL            string
+	username           string
+	appPassword        string
+	client             *http.Client
+	isConnected        bool
+	mutex              sync.Mutex
+	savedSites         []SavedSite
+	currentSiteName    string
+	siteChangeCallback func()
 }
 
 // Page represents a WordPress page
@@ -48,8 +52,12 @@ type PageList []Page
 // NewWordPressService creates a new instance of WordPressService
 func NewWordPressService() *WordPressService {
 	service := &WordPressService{
-		client:     &http.Client{},
-		savedSites: []SavedSite{},
+		client:           &http.Client{
+			Timeout: 30 * time.Second, // <-- Add a reasonable timeout (e.g., 30 seconds)
+		},
+		savedSites:       []SavedSite{},
+		currentSiteName:  "",
+		siteChangeCallback: nil,
 	}
 	
 	// Load saved sites
@@ -73,6 +81,12 @@ func (s *WordPressService) GetConfigDir() (string, error) {
 	return configDir, nil
 }
 
+func (s *WordPressService) GetCurrentSiteName() string {
+    s.mutex.Lock()
+    defer s.mutex.Unlock()
+    return s.currentSiteName
+}
+
 // SaveSite saves a site's credentials to the configuration file
 func (s *WordPressService) SaveSite(name, siteURL, username, appPassword string) error {
 	s.mutex.Lock()
@@ -85,6 +99,7 @@ func (s *WordPressService) SaveSite(name, siteURL, username, appPassword string)
 			s.savedSites[i].URL = siteURL
 			s.savedSites[i].Username = username
 			s.savedSites[i].AppPassword = encryptPassword(appPassword)
+			s.currentSiteName = name
 			return s.saveSitesToFile()
 		}
 	}
@@ -96,6 +111,10 @@ func (s *WordPressService) SaveSite(name, siteURL, username, appPassword string)
 		Username:    username,
 		AppPassword: encryptPassword(appPassword),
 	})
+	s.currentSiteName = name
+	if s.siteChangeCallback != nil {
+		s.siteChangeCallback()
+	}
 	
 	return s.saveSitesToFile()
 }
@@ -219,19 +238,33 @@ func decryptPassword(encrypted string) string {
 
 // Connect establishes a connection to the WordPress site
 func (s *WordPressService) Connect(siteURL, username, appPassword string) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
+	s.mutex.Lock() // Lock at start
+	log.Println("wpService.Connect: Lock acquired.")
 
-	// Validate inputs
-	if siteURL == "" {
-		return fmt.Errorf("site URL cannot be empty")
+	// Use flags and variables to manage state across the lock release
+	var callbackToCall func() = nil
+	siteNameFound := ""
+	connectionSuccessful := false // Track success to ensure unlock on error paths
+
+	// Defer unlock ensures it happens even on early error returns
+	defer func() {
+		// Only unlock if connection wasn't successful OR if we didn't need a callback
+		// If connection was successful AND callback was needed, it was unlocked manually.
+		if !connectionSuccessful || callbackToCall == nil {
+			log.Println("wpService.Connect: Releasing lock via defer.")
+			s.mutex.Unlock()
+		} else {
+			log.Println("wpService.Connect: Lock was released manually before callback, defer skipped unlock.")
+		}
+	}()
+
+	// ... (Input validation) ...
+	if siteURL == "" || username == "" || appPassword == "" {
+		log.Println("wpService.Connect: Input validation failed.")
+		// Return error (defer will unlock)
+		return fmt.Errorf("site URL, username, and application password cannot be empty")
 	}
-	if username == "" {
-		return fmt.Errorf("username cannot be empty")
-	}
-	if appPassword == "" {
-		return fmt.Errorf("application password cannot be empty")
-	}
+	log.Println("wpService.Connect: Input validated.")
 
 	// Normalize site URL (ensure it ends with /)
 	if !strings.HasSuffix(siteURL, "/") {
@@ -243,36 +276,78 @@ func (s *WordPressService) Connect(siteURL, username, appPassword string) error 
 	if err != nil {
 		return fmt.Errorf("invalid site URL: %w", err)
 	}
+	log.Printf("wpService.Connect: Normalized URL: %s", siteURL)
 
 	// Test connection by making a simple request to the WordPress REST API
 	testURL := fmt.Sprintf("%swp-json/wp/v2/pages?per_page=1", siteURL)
+	log.Printf("wpService.Connect: Creating request for test URL: %s", testURL)
 	req, err := http.NewRequest("GET", testURL, nil)
 	if err != nil {
+		log.Printf("wpService.Connect: Error creating request: %v", err)
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+	log.Println("wpService.Connect: Request created.")
 
 	// Add basic auth header
 	req.SetBasicAuth(username, appPassword)
+	log.Println("wpService.Connect: Basic auth set.")
 
 	// Make the request
+	log.Printf("wpService.Connect: Executing client.Do(req). Timeout: %v", s.client.Timeout)
 	resp, err := s.client.Do(req)
+	// Check for network errors first
 	if err != nil {
+		log.Printf("wpService.Connect: client.Do(req) failed. Error: %v", err)
+		// Return error (defer will unlock)
 		return fmt.Errorf("failed to connect to WordPress site: %w", err)
 	}
+	// Ensure body is closed even if status check fails
 	defer resp.Body.Close()
+	log.Printf("wpService.Connect: client.Do(req) finished. Response Status: %s", resp.Status)
 
-	// Check response status
+
+	// Check response status code
+	log.Printf("wpService.Connect: Response status code: %d", resp.StatusCode)
 	if resp.StatusCode != http.StatusOK {
+		// Return error (defer will unlock)
 		return fmt.Errorf("failed to authenticate with WordPress site: HTTP %d", resp.StatusCode)
 	}
 
-	// Store credentials
+	// --- If we reach here, connection is successful ---
+	connectionSuccessful = true // Mark as successful for defer logic
+	log.Println("wpService.Connect: Connection successful. Storing credentials.")
 	s.siteURL = siteURL
 	s.username = username
 	s.appPassword = appPassword
 	s.isConnected = true
 
-	return nil
+	// Check for saved site and prepare for callback
+	for _, site := range s.savedSites {
+		if site.URL == siteURL && site.Username == username {
+			s.currentSiteName = site.Name
+			siteNameFound = site.Name
+			if s.siteChangeCallback != nil {
+				callbackToCall = s.siteChangeCallback // Get ref
+			}
+			break
+		}
+	}
+
+	// If we need to call the callback, unlock manually FIRST
+	if callbackToCall != nil {
+		log.Println("wpService.Connect: Releasing lock manually before callback.")
+		s.mutex.Unlock() // Manual unlock
+
+		log.Printf("wpService.Connect: Calling siteChangeCallback for site: %s", siteNameFound)
+		callbackToCall() // Call the callback (lock is released)
+		log.Println("wpService.Connect: siteChangeCallback finished.")
+	} else {
+		log.Println("wpService.Connect: No callback needed or no matching site found.")
+		// If no callback, the defer will handle the unlock
+	}
+
+	log.Println("wpService.Connect: Returning nil (success).")
+	return nil // Success!
 }
 
 // IsConnected returns the connection status
@@ -461,4 +536,16 @@ func (s *WordPressService) Disconnect() {
 	s.siteURL = ""
 	s.username = ""
 	s.appPassword = ""
+	s.currentSiteName = ""
+	
+	if s.siteChangeCallback != nil {
+		s.siteChangeCallback()
+	}
+}
+
+// SetSiteChangeCallback sets a function to be called when the current site changes
+func (s *WordPressService) SetSiteChangeCallback(callback func()) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.siteChangeCallback = callback
 }

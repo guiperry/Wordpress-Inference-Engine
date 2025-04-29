@@ -33,7 +33,27 @@ func main() {
 	inferenceService := inference.NewInferenceService()
 	wpService := wordpress.NewWordPressService()
 
-	// Try to start the service with the default provider (e.g., cerebras)
+	// Update window title with current site if available
+	updateWindowTitle := func() {
+		if wpService != nil {
+			siteName := wpService.GetCurrentSiteName()
+			if siteName != "" {
+				w.SetTitle(fmt.Sprintf("Wordpress Inference Engine - %s", siteName))
+			} else {
+				w.SetTitle("Wordpress Inference Engine")
+			}
+		}
+	}
+	updateWindowTitle()
+
+	// Set up callback to update window title when site changes
+	if wpService != nil {
+		wpService.SetSiteChangeCallback(updateWindowTitle)
+	}
+
+	
+
+	// Try to start the inference service with the default provider (e.g., cerebras)
 	if err := inferenceService.Start(); err != nil {
 		// Log the error, but maybe allow the UI to load anyway
 		log.Printf("ERROR: Failed to start default inference service: %v", err)
@@ -43,11 +63,14 @@ func main() {
 	}
 
 	// Create views
-	contentManagerView := ui.NewContentManagerView(inferenceService, w)
+	contentManagerView := ui.NewContentManagerView(wpService, inferenceService, w)
 	contentGeneratorView := ui.NewContentGeneratorView(wpService, inferenceService, w)
 	inferenceSettingsView := ui.NewInferenceSettingsView(inferenceService, w)
 	wordpressSettingsView := ui.NewWordPressSettingsView(wpService, w)
 	testInferenceView := ui.NewTestInferenceView(inferenceService, w) 
+
+	// This needs to happen after both views are created.
+	contentManagerView.SetContentGeneratorView(contentGeneratorView)
 
 	// Combine settings views
 	settingsContent := container.NewAdaptiveGrid(2, // <--- Changed from NewVBox
@@ -64,6 +87,19 @@ func main() {
 		container.NewTabItem("Settings", container.NewScroll(settingsContent)),
 		container.NewTabItem("Test Inference", testInferenceView.Container()),
 	)
+
+	// --- Add OnSelected callback ---
+	tabs.OnSelected = func(tab *container.TabItem) {
+		if tab.Text == "Manager" {
+			// When the Manager tab is selected, refresh its status
+			contentManagerView.RefreshStatus()
+		}
+		// Add similar checks for other tabs if they need refreshing on select
+	}
+	// --- End of OnSelected callback ---
+
+	// Set the initial selected tab (optional, defaults to first)
+	tabs.SelectIndex(2) // Select Manager tab initially
 
 	// Ensure the service is stopped cleanly on exit
 	w.SetCloseIntercept(func() {
