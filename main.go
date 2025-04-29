@@ -26,6 +26,7 @@ func main() {
 	}
 
 	a := app.New()
+	a.Settings().SetTheme(&ui.HighContrastTheme{})
 	w := a.NewWindow("Wordpress Inference Engine")
 
 	// Initialize the consolidated inference service
