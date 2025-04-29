@@ -42,7 +42,7 @@ This implementation plan outlines the major steps, components, and consideration
 
 **Phase 2: AI Content Generation Integration**
 
-*   **Goal:** Use the existing `InferenceService` to generate new content based on the selected WordPress page.
+*   **Goal:** Use the existing `InferenceService` to generate new content based on the loaded source content (selected site pages, uploaded files, and text input entry fields for keywords/topics).
 *   **Tasks:**
     *   **Add "Generate Content" UI:**
         *   Add a button like "Generate New Content with AI" to the "Generator" tab.

@@ -89,6 +89,7 @@ func (v *ContentGeneratorView) initialize() {
 	v.promptEntry = widget.NewMultiLineEntry()
 	v.promptEntry.SetPlaceHolder("Enter a prompt or topic for the AI to generate content about...")
 	v.promptEntry.Wrapping = fyne.TextWrapWord
+	v.promptEntry.SetMinRowsVisible(10) // <--- Add this line
 	
 	v.generateButton = widget.NewButton("Generate Content", func() {
 		// This will be implemented in Phase 2
@@ -108,16 +109,22 @@ func (v *ContentGeneratorView) initialize() {
 		container.NewScroll(v.sourceList),
 	)
 	
-	promptContainer := container.NewVBox(
-		widget.NewLabel("Prompt:"),
-		v.promptEntry,
-		v.generateButton,
+	promptContainer := container.NewBorder(
+		widget.NewLabel("Prompt:"),       // Top
+		v.generateButton,                 // Bottom
+		nil,                              // Left
+		nil,                              // Right
+		container.NewScroll(v.promptEntry), // Center - Scroll expands
 	)
 	
-	resultContainer := container.NewVBox(
-		widget.NewLabel("Generated Content:"),
-		container.NewScroll(v.resultOutput),
+	resultContainer := container.NewBorder(
+		widget.NewLabel("Generated Content:"), // Top
+		nil,                                   // Bottom
+		nil,                                   // Left
+		nil,                                   // Right
+		container.NewScroll(v.resultOutput),   // Center - Scroll expands
 	)
+	
 	
 	// Main layout
 	leftPanel := container.NewVSplit(

@@ -59,11 +59,14 @@ func main() {
 	promptInput := widget.NewMultiLineEntry()
 	promptInput.SetPlaceHolder("Enter a prompt to test the inference engine...")
 	promptInput.Wrapping = fyne.TextWrapWord
+	promptInput.SetMinRowsVisible(10) // <--- Add this line
 
 	responseOutput := widget.NewMultiLineEntry()
 	responseOutput.SetPlaceHolder("Response will appear here...")
 	responseOutput.Wrapping = fyne.TextWrapWord
 	responseOutput.MultiLine = true
+	responseOutput.SetMinRowsVisible(10) // <--- Add this line
+	// responseOutput.Disable() // Keep enabled for copy-paste
 	// responseOutput.Disable() // Keep enabled for copy-paste
 
 	testButton := widget.NewButton("Test Inference", func() {
@@ -105,16 +108,27 @@ func main() {
 		}()
 	})
 
+	promptArea := container.NewBorder(
+		widget.NewLabel("Test Prompt:"), // Top
+		testButton,                      // Bottom
+		nil,                             // Left
+		nil,                             // Right
+		container.NewScroll(promptInput),  // Center - Scroll expands
+	)
+	
+	// --- Bottom part for Response ---
+	responseArea := container.NewBorder(
+		widget.NewLabel("Response:"),          // Top
+		nil,                                   // Bottom
+		nil,                                   // Left
+		nil,                                   // Right
+		container.NewScroll(responseOutput),   // Center - Scroll expands
+	)
+
 	testContainer := container.NewVSplit(
-		container.NewVBox(
-			widget.NewLabel("Test Prompt:"),
-			promptInput,
-			testButton,
-		),
-		container.NewVBox(
-			widget.NewLabel("Response:"),
-			container.NewScroll(responseOutput),
-		),
+		promptArea,   // Use the new Border layout here
+		responseArea, // And here
+
 	)
 	testContainer.SetOffset(0.4) // Adjust split ratio
 
@@ -122,7 +136,7 @@ func main() {
 	tabs := container.NewAppTabs(
 		container.NewTabItem("Manager", contentManagerView.Container()),
 		container.NewTabItem("Generator", contentGeneratorView.Container()),
-		container.NewTabItem("Settings", combinedSettings),
+		container.NewTabItem("Settings", container.NewScroll(combinedSettings)),
 		container.NewTabItem("Test Inference", testContainer),
 	)
 
@@ -136,6 +150,6 @@ func main() {
 	})
 
 	w.SetContent(tabs)
-	w.Resize(fyne.NewSize(1024, 768))
+	w.Resize(fyne.NewSize(400, 600))
 	w.ShowAndRun()
 }

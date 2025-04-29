@@ -13,6 +13,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
+	"fyne.io/fyne/v2/layout"
 )
 
 // WordPressSettingsView represents the WordPress settings view
@@ -131,7 +132,7 @@ func (v *WordPressSettingsView) initialize() {
 		widget.NewLabel("Saved Sites"),
 		container.NewBorder(
 			nil,
-			container.NewHBox(v.loadSiteButton, v.deleteSiteButton),
+			container.NewHBox(layout.NewSpacer(),v.loadSiteButton, v.deleteSiteButton),
 			nil, nil,
 			container.NewScroll(v.savedSitesList),
 		),

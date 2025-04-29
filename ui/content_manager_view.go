@@ -11,6 +11,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
+	"fyne.io/fyne/v2/layout"
 )
 
 // ContentManagerView represents the WordPress content manager view
@@ -99,7 +100,7 @@ func (v *ContentManagerView) initialize() {
 		),
 		container.NewBorder(
 			widget.NewLabel("Content:"),
-			container.NewHBox(v.saveButton, v.loadContentButton),
+			container.NewHBox(layout.NewSpacer(),v.saveButton, v.loadContentButton),
 			nil, nil,
 			container.NewScroll(v.contentEditor),
 		),
