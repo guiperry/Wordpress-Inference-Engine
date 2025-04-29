@@ -128,21 +128,30 @@ func (v *WordPressSettingsView) initialize() {
 		v.statusLabel,
 	)
 
-	savedSitesContainer := container.NewVBox(
-		widget.NewLabel("Saved Sites"),
-		container.NewBorder(
-			nil,
-			container.NewHBox(layout.NewSpacer(),v.loadSiteButton, v.deleteSiteButton),
-			nil, nil,
-			container.NewScroll(v.savedSitesList),
-		),
+	savedSitesContent := container.NewBorder(
+		nil, // Top
+		// Buttons go at the bottom of this inner border layout
+		container.NewHBox(layout.NewSpacer(), v.loadSiteButton, v.deleteSiteButton),
+		nil, // Left
+		nil, // Right
+		v.savedSitesList, // List goes in the center
+	)
+	
+	savedSitesContainer := container.NewBorder(
+		widget.NewLabel("Saved Sites"), // Top
+		nil,                            // Bottom
+		nil,                            // Left
+		nil,                            // Right
+		container.NewScroll(savedSitesContent), // Center <-- The scrollable part now expands
 	)
 
 	// Main layout
-	v.container = container.NewVBox(
-		connectionForm,
-		widget.NewSeparator(),
-		savedSitesContainer,
+	v.container = container.NewBorder(
+		container.NewVBox(connectionForm, widget.NewSeparator()), // Top
+		nil,                 // Bottom
+		nil,                 // Left
+		nil,                 // Right
+		savedSitesContainer, // Center <-- This container now expands
 	)
 }
 
@@ -169,11 +178,17 @@ func NewInferenceSettingsView(inferenceService *inference.InferenceService, wind
 	return view
 }
 
-// initialize initializes the inference settings view
+// Initializes the inference settings view
 func (v *InferenceSettingsView) initialize() {
 	// Provider selection
 	providerOptions := []string{"cerebras", "openai"} // Add more registered providers here
 	v.providerSelect = widget.NewSelect(providerOptions, func(selectedProvider string) {
+		if selectedProvider == v.inferenceService.GetActiveProviderName() {
+			// No actual change, likely triggered by SetSelected or refresh. Ignore.
+			// log.Printf("UI: Provider selection callback triggered for current provider '%s', ignoring.", selectedProvider) // Optional: Add a log for debugging if needed
+			return
+		}
+		
 		log.Printf("UI: Provider selection changed to: %s", selectedProvider)
 		err := v.inferenceService.SwitchToProvider(selectedProvider)
 		if err != nil {

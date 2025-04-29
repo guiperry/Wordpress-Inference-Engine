@@ -11,7 +11,6 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/widget"
 
 	"github.com/joho/godotenv"
 
@@ -47,97 +46,22 @@ func main() {
 	contentGeneratorView := ui.NewContentGeneratorView(wpService, inferenceService, w)
 	inferenceSettingsView := ui.NewInferenceSettingsView(inferenceService, w)
 	wordpressSettingsView := ui.NewWordPressSettingsView(wpService, w)
+	testInferenceView := ui.NewTestInferenceView(inferenceService, w) 
 
 	// Combine settings views
-	combinedSettings := container.NewVBox(
+	settingsContent := container.NewAdaptiveGrid(2, // <--- Changed from NewVBox
 		inferenceSettingsView.Container(),
-		widget.NewSeparator(),
 		wordpressSettingsView.Container(),
 	)
 
-	// --- Test Tab ---
-	promptInput := widget.NewMultiLineEntry()
-	promptInput.SetPlaceHolder("Enter a prompt to test the inference engine...")
-	promptInput.Wrapping = fyne.TextWrapWord
-	promptInput.SetMinRowsVisible(10) // <--- Add this line
-
-	responseOutput := widget.NewMultiLineEntry()
-	responseOutput.SetPlaceHolder("Response will appear here...")
-	responseOutput.Wrapping = fyne.TextWrapWord
-	responseOutput.MultiLine = true
-	responseOutput.SetMinRowsVisible(10) // <--- Add this line
-	// responseOutput.Disable() // Keep enabled for copy-paste
-	// responseOutput.Disable() // Keep enabled for copy-paste
-
-	testButton := widget.NewButton("Test Inference", func() {
-		prompt := promptInput.Text
-		if prompt == "" {
-			dialog.ShowInformation("Error", "Please enter a prompt", w)
-			return
-		}
-
-		if !inferenceService.IsRunning() {
-			dialog.ShowInformation("Error", "Inference service is not running. Check settings and logs.", w)
-			return
-		}
-
-		// Show a loading indicator
-		progress := dialog.NewProgressInfinite("Generating", "Sending prompt to "+inferenceService.GetActiveProviderName()+"..."+"\nPlease wait...", w)
-		progress.Show()
-
-		// Run in a goroutine to avoid blocking the UI
-		go func() {
-
-			// Defer hiding the progress indicator to ensure it closes even on error
-			defer progress.Hide()
-
-			response, err := inferenceService.GenerateText(prompt)
-			
-			if err != nil {
-				log.Printf("UI Error: Test generation failed: %v", err)
-				dialog.ShowError(err, w)
-				responseOutput.SetText(fmt.Sprintf("ERROR:\n%v", err)) // Show error in output
-				return
-				} else {
-
-					responseOutput.SetText(response)
-				}
-			
-
-			log.Printf("UI: Test generation successful. Response: %s", response)
-		}()
-	})
-
-	promptArea := container.NewBorder(
-		widget.NewLabel("Test Prompt:"), // Top
-		testButton,                      // Bottom
-		nil,                             // Left
-		nil,                             // Right
-		container.NewScroll(promptInput),  // Center - Scroll expands
-	)
 	
-	// --- Bottom part for Response ---
-	responseArea := container.NewBorder(
-		widget.NewLabel("Response:"),          // Top
-		nil,                                   // Bottom
-		nil,                                   // Left
-		nil,                                   // Right
-		container.NewScroll(responseOutput),   // Center - Scroll expands
-	)
-
-	testContainer := container.NewVSplit(
-		promptArea,   // Use the new Border layout here
-		responseArea, // And here
-
-	)
-	testContainer.SetOffset(0.4) // Adjust split ratio
 
 	// --- Main Tabs ---
 	tabs := container.NewAppTabs(
 		container.NewTabItem("Manager", contentManagerView.Container()),
 		container.NewTabItem("Generator", contentGeneratorView.Container()),
-		container.NewTabItem("Settings", container.NewScroll(combinedSettings)),
-		container.NewTabItem("Test Inference", testContainer),
+		container.NewTabItem("Settings", container.NewScroll(settingsContent)),
+		container.NewTabItem("Test Inference", testInferenceView.Container()),
 	)
 
 	// Ensure the service is stopped cleanly on exit
@@ -150,6 +74,6 @@ func main() {
 	})
 
 	w.SetContent(tabs)
-	w.Resize(fyne.NewSize(400, 600))
+	w.Resize(fyne.NewSize(900, 700))
 	w.ShowAndRun()
 }
