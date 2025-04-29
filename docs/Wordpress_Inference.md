@@ -45,17 +45,17 @@ This implementation plan outlines the major steps, components, and consideration
 *   **Goal:** Use the existing `InferenceService` to generate new content based on the loaded source content (selected site pages, uploaded files, and text input entry fields for keywords/topics).
 *   **Tasks:**
     *   **Add "Generate Content" UI:**
-        *   Add a button like "Generate New Content with AI" to the "Generator" tab.
+        *   Add full functionality to the button "Generate New Content with AI" to the "Generator" tab.
         *   Add a small input field for a prompt/topic keywords for the AI.
         *   Add a list of pages loaded from the content manager to be used as source content.
-        *   Add an upload file button to add files as source content.
-        *   Add a "Generate" button.
+        *   Add full functionality to the button "Add SOurce" to upload files as source content.
+        *   Add a full functionality to the "Generate" button.
     *   **Update WordPress Service/UI Logic:**
         *   When "Generate Content" is clicked:
-            *   Get the currently selected page's content (or use the prompt hint).
-            *   Construct a suitable prompt for the `InferenceService` (e.g., "Rewrite the following content to be more engaging: [page content]"). You might need new prompt templates in your inference package.
+            *   Get the currently selected page's content, all uploaded files, and the prompt keywords textbox content.
+            *   Construct a suitable prompt for the `InferenceService` (e.g., "Synthesize (combine and augment) the following content to be more engaging and effective: [page content]"). We might need new prompt templates in our inference package.
             *   Call `InferenceService.GenerateText(prompt)`. Use a progress dialog as this can take time.
-            *   On success, populate the content editor `widget.Entry` with the AI-generated response.
+            *   On success, populate the Generate Content editor `widget.Entry` with the AI-generated response.
             *   Allow the user to review/edit the generated content before saving it using the existing "Save Content" button.
 
 **Phase 3: AI-Driven Content Replacement**
