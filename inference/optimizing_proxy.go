@@ -1,8 +1,9 @@
-// /home/gperry/Documents/GitHub/cloud-equities/FIG_Inference/inference/optimizing_proxy.go
+// /home/gperry/Documents/GitHub/Inc-Line/Wordpress-Inference-Engine/inference/optimizing_proxy.go
 package inference
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 
@@ -10,119 +11,142 @@ import (
 )
 
 // OptimizingProxy implements advanced LLM interaction techniques
-// on top of a base llm.LLM implementation.
+// and delegates requests between a proxy LLM and a base LLM.
 type OptimizingProxy struct {
-	baseLLM llm.LLM // The underlying LLM client (configured by InferenceService)
-	// Add fields for context management if needed for "Model Context Protocol"
+	proxyLLM llm.LLM // The LLM instance for proxy operations (e.g., Cerebras)
+	baseLLM  llm.LLM // The LLM instance for base operations (e.g., Gemini)
+	// Add fields for context management if needed
 	// e.g., conversationHistory []llm.PromptMessage
+
+	// Define the token limit for the proxy LLM
+	// TODO: Get this dynamically if possible from the llm.LLM interface or provider
+	proxyTokenLimit int
 }
 
 // NewOptimizingProxy creates a new proxy instance.
-func NewOptimizingProxy(baseLLM llm.LLM) *OptimizingProxy {
-	if baseLLM == nil {
-		// Handle nil case appropriately, maybe return error or panic
-		log.Println("Warning: NewOptimizingProxy called with nil baseLLM")
+// It requires both the proxy LLM and the base LLM.
+func NewOptimizingProxy(proxyLLM llm.LLM, baseLLM llm.LLM) *OptimizingProxy {
+	if proxyLLM == nil || baseLLM == nil {
+		log.Println("CRITICAL: NewOptimizingProxy called with nil proxyLLM or baseLLM")
+		// Handle this critical error, maybe panic or return nil with error handling upstream
+		return nil // Or panic("Proxy requires valid LLM instances")
 	}
 	return &OptimizingProxy{
-		baseLLM: baseLLM,
+		proxyLLM:        proxyLLM,
+		baseLLM:         baseLLM,
+		proxyTokenLimit: 8000, // Hardcoded Cerebras limit (approx), adjust as needed
 		// Initialize context fields if added
 	}
 }
 
-// GenerateSimple performs a basic generation request using the underlying LLM.
+// estimateTokens provides a very basic token estimation.
+// Replace with a proper tokenizer (like tiktoken) for accuracy.
+func estimateTokens(text string) int {
+	// Very rough estimate: 1 token ~ 4 chars in English
+	// This is highly inaccurate and should be replaced.
+	return len(text) / 3
+}
+
+// GenerateSimple performs basic generation, deciding whether to use proxy or base LLM.
 func (p *OptimizingProxy) GenerateSimple(ctx context.Context, promptText string) (string, error) {
-	if p.baseLLM == nil {
-		return "", fmt.Errorf("optimizing proxy has no base LLM configured")
+	if p.proxyLLM == nil || p.baseLLM == nil {
+		return "", fmt.Errorf("optimizing proxy is not properly configured with LLM instances")
 	}
-	log.Println("OptimizingProxy: Performing simple generation...")
 
-	prompt := llm.NewPrompt(promptText) // Use library's prompt struct
+	estimatedTokens := estimateTokens(promptText) // Use a better tokenizer here
+	log.Printf("OptimizingProxy: Estimated tokens for prompt: %d (Proxy limit: %d)", estimatedTokens, p.proxyTokenLimit)
 
-	// Delegate directly to the base LLM
-	response, err := p.baseLLM.Generate(ctx, prompt)
+	var targetLLM llm.LLM
+	var targetName string
+
+	// --- Delegation Logic ---
+	if estimatedTokens > p.proxyTokenLimit {
+		log.Println("OptimizingProxy: Prompt exceeds proxy limit. Delegating to Base LLM (Gemini)...")
+		targetLLM = p.baseLLM
+		targetName = "Base (Gemini)" // For logging
+	} else {
+		log.Println("OptimizingProxy: Prompt within limit. Handling with Proxy LLM (Cerebras)...")
+		targetLLM = p.proxyLLM
+		targetName = "Proxy (Cerebras)" // For logging
+	}
+	// --- End Delegation Logic ---
+
+	prompt := llm.NewPrompt(promptText)
+
+	// Delegate to the chosen LLM
+	response, err := targetLLM.Generate(ctx, prompt)
 	if err != nil {
-		return "", fmt.Errorf("base LLM generation failed: %w", err)
+		// Add target name to error context
+		return "", fmt.Errorf("generation failed using %s: %w", targetName, err)
 	}
+	log.Printf("OptimizingProxy: Generation successful using %s.", targetName)
 	return response, nil
 }
 
-// GenerateWithCoT performs generation using a Chain-of-Thought prompt structure.
+// GenerateWithCoT, GenerateWithReflection, GenerateStructuredOutput
+// should also implement similar delegation logic based on estimated tokens
+// or other complexity metrics before calling the appropriate LLM.
+
+// Example for GenerateWithCoT (adapt others similarly)
 func (p *OptimizingProxy) GenerateWithCoT(ctx context.Context, promptText string) (string, error) {
-	if p.baseLLM == nil {
-		return "", fmt.Errorf("optimizing proxy has no base LLM configured")
-	}
-	log.Println("OptimizingProxy: Performing Chain-of-Thought generation...")
+    if p.proxyLLM == nil || p.baseLLM == nil {
+        return "", fmt.Errorf("optimizing proxy is not properly configured")
+    }
 
-	// 1. Construct a CoT prompt (instruct the model to think step-by-step)
-	cotPromptText := fmt.Sprintf("Think step-by-step to answer the following question:\n%s\n\nReasoning steps:", promptText)
-	prompt := llm.NewPrompt(cotPromptText)
+    // Construct CoT prompt
+    cotPromptText := fmt.Sprintf("Think step-by-step to answer the following question:\n%s\n\nReasoning steps:", promptText)
+    estimatedTokens := estimateTokens(cotPromptText) // Estimate based on the modified prompt
+    log.Printf("OptimizingProxy (CoT): Estimated tokens: %d (Proxy limit: %d)", estimatedTokens, p.proxyTokenLimit)
 
-	// 2. Generate the reasoning and final answer
-	// Note: This might require multiple calls or specific parsing depending on the model
-	fullResponse, err := p.baseLLM.Generate(ctx, prompt)
-	if err != nil {
-		return "", fmt.Errorf("CoT generation failed: %w", err)
-	}
+    var targetLLM llm.LLM
+    var targetName string
 
-	// 3. TODO: Optionally parse the fullResponse to extract only the final answer,
-	//    or return the full reasoning + answer. For now, return full response.
-	log.Println("OptimizingProxy: CoT generation complete.")
-	return fullResponse, nil
+    if estimatedTokens > p.proxyTokenLimit {
+        log.Println("OptimizingProxy (CoT): Delegating to Base LLM (Gemini)...")
+        targetLLM = p.baseLLM
+        targetName = "Base (Gemini)"
+    } else {
+        log.Println("OptimizingProxy (CoT): Handling with Proxy LLM (Cerebras)...")
+        targetLLM = p.proxyLLM
+        targetName = "Proxy (Cerebras)"
+    }
+
+    prompt := llm.NewPrompt(cotPromptText)
+    fullResponse, err := targetLLM.Generate(ctx, prompt)
+    if err != nil {
+        return "", fmt.Errorf("CoT generation failed using %s: %w", targetName, err)
+    }
+
+    log.Printf("OptimizingProxy (CoT): Generation complete using %s.", targetName)
+    // TODO: Optional parsing
+    return fullResponse, nil
 }
 
-// GenerateWithReflection performs generation, then asks the model to reflect and improve.
+// Implement similar delegation logic for GenerateWithReflection and GenerateStructuredOutput...
 func (p *OptimizingProxy) GenerateWithReflection(ctx context.Context, promptText string) (string, error) {
-	if p.baseLLM == nil {
-		return "", fmt.Errorf("optimizing proxy has no base LLM configured")
-	}
-	log.Println("OptimizingProxy: Performing generation with self-reflection...")
-
-	// 1. Initial Generation
-	initialPrompt := llm.NewPrompt(promptText)
-	initialResponse, err := p.baseLLM.Generate(ctx, initialPrompt)
-	if err != nil {
-		return "", fmt.Errorf("initial generation for reflection failed: %w", err)
-	}
-
-	// 2. Reflection Prompt
-	reflectionPromptText := fmt.Sprintf(
-		"Original prompt: %s\n\nInitial response: %s\n\nPlease review the initial response. Identify any flaws, inaccuracies, or areas for improvement. Then, provide a revised, improved response.",
-		promptText,
-		initialResponse,
-	)
-	reflectionPrompt := llm.NewPrompt(reflectionPromptText)
-
-	// 3. Generate Reflected Response
-	reflectedResponse, err := p.baseLLM.Generate(ctx, reflectionPrompt)
-	if err != nil {
-		return "", fmt.Errorf("reflection generation failed: %w", err)
-	}
-
-	// 4. TODO: Optionally parse the reflectedResponse to extract only the final improved answer.
-	log.Println("OptimizingProxy: Reflection generation complete.")
-	return reflectedResponse, nil
+    // 1. Initial Generation (Decide which LLM based on promptText size)
+    // 2. Reflection Prompt Construction (Combine original prompt + initial response)
+    // 3. Second Generation (Decide which LLM based on reflection prompt size)
+    log.Println("OptimizingProxy: GenerateWithReflection - TODO: Implement delegation logic")
+    // Placeholder: Just use proxy for now
+    if p.proxyLLM == nil { return "", errors.New("proxy not configured")}
+    initialPrompt := llm.NewPrompt(promptText)
+	initialResponse, err := p.proxyLLM.Generate(ctx, initialPrompt)
+	if err != nil { return "", err }
+    reflectionPromptText := fmt.Sprintf("Original prompt: %s\n\nInitial response: %s\n\nPlease review...", promptText, initialResponse)
+    reflectionPrompt := llm.NewPrompt(reflectionPromptText)
+    return p.proxyLLM.Generate(ctx, reflectionPrompt) // Needs proper delegation
 }
 
-// GenerateStructuredOutput requests structured output (delegated to base LLM/provider)
-// This proxy doesn't modify the structured output process itself, just passes it through.
 func (p *OptimizingProxy) GenerateStructuredOutput(ctx context.Context, content string, schema string) (string, error) {
-	if p.baseLLM == nil {
-		return "", fmt.Errorf("optimizing proxy has no base LLM configured")
-	}
-	log.Println("OptimizingProxy: Performing structured output generation...")
-
-	// Create prompt with schema instructions (as done previously)
-	structuredContent := fmt.Sprintf("Content: %s\n\nPlease respond strictly using this JSON schema:\n```json\n%s\n```", content, schema)
+    // Estimate size based on content + schema instructions
+    // Decide which LLM to use
+    log.Println("OptimizingProxy: GenerateStructuredOutput - TODO: Implement delegation logic")
+    // Placeholder: Just use proxy for now
+    if p.proxyLLM == nil { return "", errors.New("proxy not configured")}
+    structuredContent := fmt.Sprintf("Content: %s\n\nPlease respond strictly using this JSON schema:\n```json\n%s\n```", content, schema)
 	prompt := llm.NewPrompt(structuredContent)
-	// Alternatively, use llm.WithOutput if gollm/provider supports it better
-
-	response, err := p.baseLLM.Generate(ctx, prompt)
-	if err != nil {
-		return "", fmt.Errorf("structured output generation failed: %w", err)
-	}
-	return response, nil
+    return p.proxyLLM.Generate(ctx, prompt) // Needs proper delegation
 }
 
-// TODO: Implement other methods like Self-Improvement, Self-Consistency
-// TODO: Implement Model Context Protocol (e.g., managing conversation history)
 

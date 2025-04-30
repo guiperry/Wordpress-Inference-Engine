@@ -180,105 +180,89 @@ func NewInferenceSettingsView(inferenceService *inference.InferenceService, wind
 
 // Initializes the inference settings view
 func (v *InferenceSettingsView) initialize() {
-	// Provider selection
-	providerOptions := []string{"cerebras", "openai"} // Add more registered providers here
-	v.providerSelect = widget.NewSelect(providerOptions, func(selectedProvider string) {
-		if selectedProvider == v.inferenceService.GetActiveProviderName() {
-			// No actual change, likely triggered by SetSelected or refresh. Ignore.
-			// log.Printf("UI: Provider selection callback triggered for current provider '%s', ignoring.", selectedProvider) // Optional: Add a log for debugging if needed
-			return
-		}
-
-		log.Printf("UI: Provider selection changed to: %s", selectedProvider)
-		err := v.inferenceService.SwitchToProvider(selectedProvider)
-		if err != nil {
-			log.Printf("UI Error: Failed to switch provider: %v", err)
-			dialog.ShowError(err, v.window)
-		} else {
-			log.Printf("UI: Switched provider successfully to %s", selectedProvider)
-		}
-	})
-	v.providerSelect.SetSelected(v.inferenceService.GetActiveProviderName())
+	// --- Remove Provider Selection ---
+	// v.providerSelect = widget.NewSelect(...) // Remove this
 
 	// API Key Inputs
-	v.openaiKeyEntry = widget.NewPasswordEntry()
-	v.openaiKeyEntry.SetPlaceHolder("OpenAI API Key (optional, loaded from env)")
-	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
-		v.openaiKeyEntry.SetText(key)
-		v.openaiKeyEntry.Disable() // Indicate it's loaded from env
-	}
-	saveOpenAIButton := widget.NewButton("Set OpenAI Key Env Var", func() {
-		key := v.openaiKeyEntry.Text
-		if key != "" {
-			os.Setenv("OPENAI_API_KEY", key)
-			dialog.ShowInformation("Restart Required", "OpenAI API key environment variable set.\nPlease restart the application for the change to take full effect.", v.window)
-			v.openaiKeyEntry.Disable()
-		}
-	})
-	// Allow enabling if disabled
-	v.openaiKeyEntry.OnChanged = func(_ string) {
-		if v.openaiKeyEntry.Disabled() {
-			v.openaiKeyEntry.Enable()
-		} // <-- Brace was missing here
-	}
-
+	// Keep Cerebras Key Input
 	v.cerebrasKeyEntry = widget.NewPasswordEntry()
-	v.cerebrasKeyEntry.SetPlaceHolder("Cerebras API Key (optional, loaded from env)")
+	v.cerebrasKeyEntry.SetPlaceHolder("Cerebras API Key (Proxy - loaded from env)")
 	if key := os.Getenv("CEREBRAS_API_KEY"); key != "" {
 		v.cerebrasKeyEntry.SetText(key)
-		v.cerebrasKeyEntry.Disable() // Indicate it's loaded from env
+		v.cerebrasKeyEntry.Disable()
 	}
 	saveCerebrasButton := widget.NewButton("Set Cerebras Key Env Var", func() {
 		key := v.cerebrasKeyEntry.Text
 		if key != "" {
 			os.Setenv("CEREBRAS_API_KEY", key)
-			dialog.ShowInformation("Restart Required", "Cerebras API key environment variable set.\nPlease restart the application for the change to take full effect.", v.window)
+			dialog.ShowInformation("Restart Required", "Cerebras API key environment variable set.\nPlease restart the application.", v.window)
 			v.cerebrasKeyEntry.Disable()
 		}
 	})
-	// Allow enabling if disabled
 	v.cerebrasKeyEntry.OnChanged = func(_ string) {
-		if v.cerebrasKeyEntry.Disabled() {
-			v.cerebrasKeyEntry.Enable()
-		}
-	} // <-- Brace was missing here
+		if v.cerebrasKeyEntry.Disabled() { v.cerebrasKeyEntry.Enable() }
+	}
 
-	// Model Selection
+	// --- Add Gemini Key Input ---
+	geminiKeyEntry := widget.NewPasswordEntry() // Create new entry
+	geminiKeyEntry.SetPlaceHolder("Gemini API Key (Base - loaded from env)")
+	if key := os.Getenv("GEMINI_API_KEY"); key != "" {
+		geminiKeyEntry.SetText(key)
+		geminiKeyEntry.Disable()
+	}
+	saveGeminiButton := widget.NewButton("Set Gemini Key Env Var", func() {
+		key := geminiKeyEntry.Text
+		if key != "" {
+			os.Setenv("GEMINI_API_KEY", key)
+			dialog.ShowInformation("Restart Required", "Gemini API key environment variable set.\nPlease restart the application.", v.window)
+			geminiKeyEntry.Disable()
+		}
+	})
+	geminiKeyEntry.OnChanged = func(_ string) {
+		if geminiKeyEntry.Disabled() { geminiKeyEntry.Enable() }
+	}
+
+
+	// Model Selection (Let's configure the Proxy/Cerebras model here)
 	v.modelEntry = widget.NewEntry()
-	v.modelEntry.SetPlaceHolder("Enter model name (e.g., gpt-4, llama-4-scout-17b-16e-instruct)")
-	v.modelEntry.SetText(v.inferenceService.GetCurrentModel()) // Set initial model
+	v.modelEntry.SetPlaceHolder("Enter Proxy model (e.g., llama-4-scout-17b-16e-instruct)")
+	v.modelEntry.SetText(v.inferenceService.GetProxyModel()) // Get proxy model
 
-	setModelButton := widget.NewButton("Set Model", func() {
+	setModelButton := widget.NewButton("Set Proxy Model", func() { // Update button text
 		model := v.modelEntry.Text
-		if model == "" {
-			dialog.ShowInformation("Info", "Please enter a model name.", v.window)
-			return
-		}
-		err := v.inferenceService.SetModel(model)
+		if model == "" { /* show info */ return }
+		// Use SetProxyModel
+		err := v.inferenceService.SetProxyModel(model)
 		if err != nil {
 			dialog.ShowError(err, v.window)
 		} else {
-			dialog.ShowInformation("Success", fmt.Sprintf("Model set to '%s'", model), v.window)
+			dialog.ShowInformation("Success", fmt.Sprintf("Proxy (Cerebras) model set to '%s'", model), v.window)
 		}
 	})
+
+    // Optional: Add entry and button for setting Base (Gemini) model if desired
+    // baseModelEntry := widget.NewEntry() ...
+    // setBaseModelButton := widget.NewButton("Set Base Model", ...) ...
+
 
 	// Create layout
 	v.container = container.NewVBox(
 		widget.NewLabel("Inference Settings"),
-		widget.NewLabel("Model Provider:"),
-		v.providerSelect,
-		widget.NewLabel("Model Name:"),
+		// widget.NewLabel("Model Provider:"), // Remove provider label
+		// v.providerSelect, // Remove select widget
+		widget.NewLabel("Proxy Model (Cerebras):"), // Update label
 		v.modelEntry,
 		setModelButton,
+        // Optional: Add Base Model widgets here
 		widget.NewSeparator(),
 		widget.NewLabel("API Keys (Set Environment Variable & Restart):"),
-		v.openaiKeyEntry,
-		saveOpenAIButton,
 		v.cerebrasKeyEntry,
 		saveCerebrasButton,
+		geminiKeyEntry, // Add Gemini key entry
+		saveGeminiButton, // Add Gemini save button
+		// Remove OpenAI widgets
 	)
 }
-
 // Container returns the container for the Inference Settings view
 // This method was added to fix the error in main.go
 func (v *InferenceSettingsView) Container() fyne.CanvasObject {

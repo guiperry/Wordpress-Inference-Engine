@@ -88,7 +88,7 @@ func (v *TestInferenceView) handleTestInference() {
 	}
 
 	// Show a loading indicator
-	progress := dialog.NewProgressInfinite("Generating", "Sending prompt to "+v.inferenceService.GetActiveProviderName()+"..."+"\nPlease wait...", v.window)
+	progress := dialog.NewProgressInfinite("Generating", "Sending prompt to "+v.inferenceService.GetName()+"...", v.window)
 	progress.Show()
 
 	// Run in a goroutine to avoid blocking the UI

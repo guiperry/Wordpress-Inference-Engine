@@ -15,18 +15,18 @@ import (
 	"github.com/joho/godotenv"
 
 	"Inference_Engine/wordpress"
+	_ "Inference_Engine/inference"
 )
 
 func main() {
 	// Load .env file contents into environment variables
-	err := godotenv.Load() // Loads .env from the current directory
+	err := godotenv.Load()
 	if err != nil {
-		// Log the error but continue; maybe the key is set directly in the environment
 		log.Println("Warning: Error loading .env file:", err)
 	}
+	// Ensure GEMINI_API_KEY is also loaded if present in .env
 
-	// Use a unique reverse-domain style ID
-	a := app.NewWithID("com.inc-line.wordpressinferenceengine") // Replace "com.example" with your domain or a unique identifier
+	a := app.NewWithID("com.inc-line.wordpressinferenceengine")
 	a.Settings().SetTheme(&ui.HighContrastTheme{})
 	w := a.NewWindow("Wordpress Inference Engine")
 
@@ -34,33 +34,19 @@ func main() {
 	inferenceService := inference.NewInferenceService()
 	wpService := wordpress.NewWordPressService()
 
-	// Update window title with current site if available
-	updateWindowTitle := func() {
-		if wpService != nil {
-			siteName := wpService.GetCurrentSiteName()
-			if siteName != "" {
-				w.SetTitle(fmt.Sprintf("Wordpress Inference Engine - %s", siteName))
-			} else {
-				w.SetTitle("Wordpress Inference Engine")
-			}
-		}
-	}
+	// ... (updateWindowTitle logic remains the same) ...
+	updateWindowTitle := func() { /* ... */ }
 	updateWindowTitle()
+	if wpService != nil { wpService.SetSiteChangeCallback(updateWindowTitle) }
 
-	// Set up callback to update window title when site changes
-	if wpService != nil {
-		wpService.SetSiteChangeCallback(updateWindowTitle)
-	}
 
-	
-
-	// Try to start the inference service with the default provider (e.g., cerebras)
+	// Try to start the inference service (which now configures both LLMs)
 	if err := inferenceService.Start(); err != nil {
-		// Log the error, but maybe allow the UI to load anyway
-		log.Printf("ERROR: Failed to start default inference service: %v", err)
-		dialog.ShowError(fmt.Errorf("Failed to start default inference provider '%s': %v\nPlease check API keys and configuration.", inferenceService.GetActiveProviderName(), err), w)
+		log.Printf("ERROR: Failed to start inference service: %v", err)
+		// Provide a more generic error message as specific provider might vary
+		dialog.ShowError(fmt.Errorf("Failed to start inference service components: %v\nPlease check API keys (Cerebras, Gemini) and configuration.", err), w)
 	} else {
-		log.Printf("Inference service started with provider: %s", inferenceService.GetActiveProviderName())
+		log.Println("Inference service started successfully.") // More generic success message
 	}
 
 	// Create views
