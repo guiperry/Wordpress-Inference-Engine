@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"strconv"
+	
 )
 
 // WordPressService manages the interaction with a WordPress site via the REST API
@@ -357,7 +359,7 @@ func (s *WordPressService) IsConnected() bool {
 	return s.isConnected
 }
 
-// GetPages fetches a list of pages from the WordPress site
+// GetPages fetches a list of pages from the WordPress site using pagination
 func (s *WordPressService) GetPages() (PageList, error) {
 	s.mutex.Lock()
 	if !s.isConnected {
@@ -369,45 +371,122 @@ func (s *WordPressService) GetPages() (PageList, error) {
 	appPassword := s.appPassword
 	s.mutex.Unlock()
 
-	// Create request URL
-	requestURL := fmt.Sprintf("%swp-json/wp/v2/pages?per_page=100", siteURL)
-	
-	req, err := http.NewRequest("GET", requestURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
+	var allPages []map[string]interface{} // Store results from all pages
+	currentPage := 1
+	perPage := 10 // Fetch 10 pages per request
+	totalPages := 1 // Initialize to 1, will be updated after the first request
 
-	// Add basic auth header
-	req.SetBasicAuth(username, appPassword)
+	log.Printf("wpService.GetPages: Starting pagination fetch (perPage=%d)", perPage)
 
-	// Make the request
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch pages: %w", err)
-	}
-	defer resp.Body.Close()
+	for { // Loop indefinitely until we determine total pages or finish
+		// Create request URL with pagination parameters
+		requestURL := fmt.Sprintf("%swp-json/wp/v2/pages?per_page=%d&page=%d&orderby=id&order=asc", siteURL, perPage, currentPage)
+		log.Printf("wpService.GetPages: Fetching page %d from URL: %s", currentPage, requestURL)
 
-	// Check response status
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch pages: HTTP %d", resp.StatusCode)
-	}
+		// Create request
+		req, err := http.NewRequest("GET", requestURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request for page %d: %w", currentPage, err)
+		}
 
-	// Parse response
-	var pages []map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&pages); err != nil {
-		return nil, fmt.Errorf("failed to parse pages response: %w", err)
-	}
+		// Add basic auth header
+		req.SetBasicAuth(username, appPassword)
 
-	// Convert to PageList
+		// Make the request
+		resp, err := s.client.Do(req)
+		if err != nil {
+			log.Printf("wpService.GetPages: Failed HTTP request for page %d: %v", currentPage, err)
+			return nil, fmt.Errorf("failed to fetch page %d: %w", currentPage, err)
+		}
+
+		// --- Get Total Pages from Header (on first successful request) ---
+		if currentPage == 1 && resp.StatusCode == http.StatusOK {
+			headerTotalPages := resp.Header.Get("X-WP-TotalPages")
+			if headerTotalPages != "" {
+				parsedTotal, parseErr := strconv.Atoi(headerTotalPages)
+				if parseErr == nil && parsedTotal > 0 {
+					totalPages = parsedTotal
+					log.Printf("wpService.GetPages: Determined total pages from header: %d", totalPages)
+				} else {
+					log.Printf("wpService.GetPages: Warning - Could not parse X-WP-TotalPages header ('%s'): %v", headerTotalPages, parseErr)
+					// Continue, but we might fetch an extra empty page if parsing failed
+				}
+			} else {
+				log.Println("wpService.GetPages: Warning - X-WP-TotalPages header not found. Will rely on empty batch detection.")
+				// If header is missing, we have to rely on the old method (empty batch)
+			}
+		}
+		// --- End Header Check ---
+
+
+		// Check response status
+		if resp.StatusCode != http.StatusOK {
+			errorBodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			log.Printf("wpService.GetPages: Received non-OK status for page %d: HTTP %d. Body: %s", currentPage, resp.StatusCode, string(errorBodyBytes))
+			// If we get a 400 on a page we expected based on totalPages, something is wrong
+			if resp.StatusCode == http.StatusBadRequest && currentPage > totalPages {
+				// This might happen if totalPages header was missing/wrong and we overshoot
+				log.Printf("wpService.GetPages: Received status %d on expected page %d (totalPages %d), assuming end.", resp.StatusCode, currentPage, totalPages)
+				break // Exit loop gracefully
+			}
+			// For other errors, return the error
+			return nil, fmt.Errorf("failed to fetch page %d: HTTP %d", currentPage, resp.StatusCode)
+		}
+
+		// Read the body
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			log.Printf("wpService.GetPages: Error reading response body for page %d: %v", currentPage, readErr)
+			return nil, fmt.Errorf("failed to read page response body for page %d: %w", currentPage, readErr)
+		}
+
+		log.Printf("wpService.GetPages: Received Body for batch %d (length %d)", currentPage, len(bodyBytes)) // Removed body content log for brevity
+
+		// Decode the current batch
+		var batchPages []map[string]interface{}
+		if err := json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&batchPages); err != nil {
+			log.Printf("wpService.GetPages: Error decoding JSON for page %d: %v", currentPage, err)
+			return nil, fmt.Errorf("failed to parse pages response for batch %d: %w", currentPage, err)
+		}
+
+		// If the batch is empty (can happen even if header was present but wrong, or if header was missing)
+		if len(batchPages) == 0 {
+			log.Printf("wpService.GetPages: Received empty batch on page %d, stopping fetch.", currentPage)
+			break // Exit the loop
+		}
+
+		// Append the fetched batch
+		allPages = append(allPages, batchPages...)
+		log.Printf("wpService.GetPages: Added %d pages from batch %d. Total pages so far: %d", len(batchPages), currentPage, len(allPages))
+
+		// Check if we've fetched the last known page
+		if currentPage >= totalPages {
+			log.Printf("wpService.GetPages: Reached expected total pages (%d). Stopping fetch.", totalPages)
+			break // Exit loop
+		}
+
+		// Move to the next page
+		currentPage++
+
+		// Optional delay
+		time.Sleep(100 * time.Millisecond)
+
+	} // End of pagination loop
+
+	log.Printf("wpService.GetPages: Finished pagination. Total pages fetched: %d. Converting to PageList.", len(allPages))
+
+	// Convert the combined results to PageList (same conversion logic as before)
 	var pageList PageList
-	for _, page := range pages {
-		id, _ := page["id"].(float64)
-		title, _ := page["title"].(map[string]interface{})
-		titleRendered, _ := title["rendered"].(string)
-		content, _ := page["content"].(map[string]interface{})
-		contentRendered, _ := content["rendered"].(string)
-		slug, _ := page["slug"].(string)
-		link, _ := page["link"].(string)
+	for _, pageData := range allPages {
+		id, _ := pageData["id"].(float64)
+		titleMap, _ := pageData["title"].(map[string]interface{})
+		titleRendered, _ := titleMap["rendered"].(string)
+		contentMap, _ := pageData["content"].(map[string]interface{})
+		contentRendered, _ := contentMap["rendered"].(string)
+		slug, _ := pageData["slug"].(string)
+		link, _ := pageData["link"].(string)
 
 		pageList = append(pageList, Page{
 			ID:      int(id),
@@ -418,9 +497,9 @@ func (s *WordPressService) GetPages() (PageList, error) {
 		})
 	}
 
+	log.Printf("wpService.GetPages: Successfully converted %d pages to PageList.", len(pageList))
 	return pageList, nil
 }
-
 // GetPageContent fetches the content of a specific page
 func (s *WordPressService) GetPageContent(pageID int) (string, error) {
 	s.mutex.Lock()

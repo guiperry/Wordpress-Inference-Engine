@@ -25,7 +25,8 @@ func main() {
 		log.Println("Warning: Error loading .env file:", err)
 	}
 
-	a := app.New()
+	// Use a unique reverse-domain style ID
+	a := app.NewWithID("com.inc-line.wordpressinferenceengine") // Replace "com.example" with your domain or a unique identifier
 	a.Settings().SetTheme(&ui.HighContrastTheme{})
 	w := a.NewWindow("Wordpress Inference Engine")
 

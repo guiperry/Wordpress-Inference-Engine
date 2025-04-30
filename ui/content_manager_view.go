@@ -52,18 +52,28 @@ func (v *ContentManagerView) RefreshStatus() {
 			siteName = "Connected Site" // Fallback if name isn't stored/retrieved
 		}
 		v.statusLabel.SetText(fmt.Sprintf("Status: Connected to %s", siteName))
-		// Optionally, trigger fetching pages if connected and list is empty
-		// if len(v.pages) == 0 {
-		//     go v.fetchPages() // Fetch in background
-		// }
+		// --- ADD THIS: Call fetchPages when connected ---
+		// Only fetch if the list is currently empty to avoid redundant calls
+		// every time the tab is selected.
+		if len(v.pages) == 0 {
+			log.Println("ContentManagerView: Connected and page list empty, fetching pages...")
+			go v.fetchPages() // Fetch in the background
+			} else {
+				log.Println("ContentManagerView: Connected, pages already loaded.")
+			}
+			// --- END OF ADDED CODE ---
 	} else {
 		v.statusLabel.SetText("Status: Disconnected")
 		// Clear page list if disconnected
-		v.pages = nil
-		v.pageList.Refresh()
-		v.contentEditor.SetText("")
-		v.saveButton.Disable()
-		v.loadContentButton.Disable()
+		if len(v.pages) > 0 { // Only clear if not already empty
+			log.Println("ContentManagerView: Disconnected, clearing page list.")
+			v.pages = nil
+			v.pageList.Refresh()
+			v.contentEditor.SetText("")
+			v.saveButton.Disable()
+			v.loadContentButton.Disable()
+			v.selectedPageID = -1 // Reset selected ID
+		}
 	}
 	v.statusLabel.Refresh()
 }
@@ -288,6 +298,7 @@ func (v *ContentManagerView) loadContentToGenerator() {
 		v.contentEditor.Text,
 		"WordPress",
 		selectedPage.ID,
+		false,
 	)
 	
 	dialog.ShowInformation("Success", fmt.Sprintf("Added '%s' to content generator", selectedPage.Title), v.window)

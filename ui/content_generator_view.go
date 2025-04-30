@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"io"
+	"log"
 	"path/filepath"
 	"strings"
 
@@ -45,6 +46,7 @@ type SourceContent struct {
 	Content string
 	Source  string // "WordPress", "File", etc.
 	ID      int    // WordPress page ID or other identifier
+	IsSample bool
 }
 
 // NewContentGeneratorView creates a new content generator view
@@ -60,7 +62,7 @@ func NewContentGeneratorView(wpService *wordpress.WordPressService, inferenceSer
 	return view
 }
 
-// initialize initializes the content generator view
+// Initializes the content generator view
 func (v *ContentGeneratorView) initialize() {
 	// Create source content UI elements
 	v.sourceList = widget.NewList(
@@ -68,11 +70,31 @@ func (v *ContentGeneratorView) initialize() {
 			return len(v.sourceContents)
 		},
 		func() fyne.CanvasObject {
-			return widget.NewLabel("Template Source")
+			check := widget.NewCheck("Sample", nil) // Checkbox for "Is Sample?"
+			label := widget.NewLabel("Template Source")
+			// Use HBox for layout. Spacer pushes label left if needed, or just box them.
+			// Add padding or adjust layout as needed for aesthetics.
+			return container.NewHBox(check, label)
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			if id < len(v.sourceContents) {
-				obj.(*widget.Label).SetText(v.sourceContents[id].Title)
+				hbox := obj.(*fyne.Container)
+				check := hbox.Objects[0].(*widget.Check)
+				label := hbox.Objects[1].(*widget.Label)
+	
+				label.SetText(v.sourceContents[id].Title)
+				check.SetChecked(v.sourceContents[id].IsSample)
+	
+				// --- Handle Checkbox Changes ---
+				// Use OnChanged within UpdateItem to capture the correct 'id'
+				check.OnChanged = func(checked bool) {
+					// Prevent index out of bounds if list refreshes during interaction
+					if id < len(v.sourceContents) {
+						v.sourceContents[id].IsSample = checked
+						log.Printf("Source '%s' marked as sample: %t", v.sourceContents[id].Title, checked)
+						// No list refresh needed here, just update the data model
+					}
+				}
 			}
 		},
 	)
@@ -108,7 +130,7 @@ func (v *ContentGeneratorView) initialize() {
 
 	// Create layout
 	sourceContainer := container.NewBorder(
-		widget.NewLabel("Source Content:"),
+		widget.NewLabel("Content Source List:"),
 		container.NewHBox(v.addSourceButton, v.removeSourceButton),
 		nil, nil,
 		container.NewScroll(v.sourceList),
@@ -157,12 +179,13 @@ func (v *ContentGeneratorView) initialize() {
 }
 
 // AddSourceContent adds a source content item to the list
-func (v *ContentGeneratorView) AddSourceContent(title, content, source string, id int) {
+func (v *ContentGeneratorView) AddSourceContent(title, content, source string, id int, isSample bool) {
 	v.sourceContents = append(v.sourceContents, SourceContent{
 		Title:   title,
 		Content: content,
 		Source:  source,
 		ID:      id,
+		IsSample: isSample,
 	})
 	v.sourceList.Refresh()
 }
@@ -241,6 +264,7 @@ func (v *ContentGeneratorView) showAddSourceDialog() {
 				string(content),
 				"File",
 				-1, // No WordPress ID for files
+				false, 
 			)
 			
 			dialog.ShowInformation("Success", fmt.Sprintf("Added file '%s' to source content", fileName), v.window)
@@ -268,39 +292,54 @@ func (v *ContentGeneratorView) generateContent() {
 	
 	// Generate content in a goroutine
 	go func() {
-		// Combine all source content
-		var combinedContent strings.Builder
-		
-		for i, source := range v.sourceContents {
-			if i > 0 {
-				combinedContent.WriteString("\n\n--- Next Source ---\n\n")
+		// --- Separate True and Sample Sources ---
+		var trueSourcesBuilder strings.Builder
+		var sampleSourcesBuilder strings.Builder
+		trueCount := 0
+		sampleCount := 0
+
+		for _, source := range v.sourceContents {
+			var builder *strings.Builder
+			var count *int
+
+			if source.IsSample {
+				builder = &sampleSourcesBuilder
+				count = &sampleCount
+			} else {
+				builder = &trueSourcesBuilder
+				count = &trueCount
 			}
-			combinedContent.WriteString(fmt.Sprintf("Source: %s\n", source.Title))
-			combinedContent.WriteString(source.Content)
+
+			if *count > 0 {
+				builder.WriteString("\n\n--- Next Source ---\n\n")
+			}
+			builder.WriteString(fmt.Sprintf("Source Title: %s\n", source.Title))
+			builder.WriteString(fmt.Sprintf("Source Type: %s\n", source.Source)) // e.g., WordPress, File
+			builder.WriteString("Content:\n")
+			builder.WriteString(source.Content)
+			*count++
 		}
-		
-		// Create a custom prompt that includes both the source content and the user's prompt
-		customPrompt := fmt.Sprintf(`
-Based on the following source content:
+		// --- End Separation ---
 
-%s
+		// Check if there are any true sources if generation requires them
+		if trueCount == 0 {
+			progress.Hide()
+			dialog.ShowError(fmt.Errorf("cannot generate content without at least one 'True Source' (uncheck 'Sample' for factual sources)"), v.window)
+			return
+		}
 
-And considering this specific request:
 
-%s
+		// --- Use the new prompt ---
+		finalPrompt := inference.GetWordPressContentGenerateWithSourcesPrompt(
+			trueSourcesBuilder.String(),
+			sampleSourcesBuilder.String(),
+			promptText,
+		)
+		// --- End Use New Prompt ---
 
-Generate new, improved content that:
-1. Synthesizes information from all sources
-2. Addresses the specific request
-3. Is well-structured and engaging
-4. Is suitable for a WordPress website (using HTML formatting where appropriate)
-5. Maintains the core message while enhancing presentation
-
-Return only the generated content without explanations or metadata.
-`, combinedContent.String(), promptText)
 		
 		// Call the inference service
-		generatedContent, err := v.inferenceService.GenerateText(customPrompt)
+		generatedContent, err := v.inferenceService.GenerateText(finalPrompt) // Use the combined prompt
 		
 		// Hide progress dialog
 		progress.Hide()

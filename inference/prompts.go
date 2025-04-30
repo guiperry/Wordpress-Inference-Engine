@@ -40,6 +40,35 @@ Please enhance this content by:
 5. Maintaining the original tone and style
 
 Return the expanded content in HTML format suitable for WordPress.`
+
+	WordPressContentGenerateWithSourcesPrompt = `You are tasked with generating content based on the provided materials. You will receive two types of sources: "True Sources" and "Sample Sources".
+
+**True Sources:** These contain the factual information, data, or core message that the generated content MUST be based on. Accuracy and adherence to the information in these sources are paramount.
+
+**Sample Sources:** These provide examples of the desired writing style, tone, structure, or formatting. Use these as a guide for *how* to present the information derived from the True Sources, but do not treat their content as factual unless it overlaps with a True Source.
+
+--- TRUE SOURCES ---
+%s
+--- END TRUE SOURCES ---
+
+--- SAMPLE SOURCES ---
+%s
+--- END SAMPLE SOURCES ---
+
+**Your Task:**
+
+Based *only* on the information provided in the **True Sources**, generate new content that addresses the following specific request:
+
+**Request:** %s
+
+**Instructions:**
+1.  Strictly adhere to the facts and information presented in the **True Sources**.
+2.  Use the **Sample Sources** as a reference for style, tone, formatting (including HTML if appropriate for WordPress), and overall presentation.
+3.  Synthesize information logically and ensure the final output is well-structured and engaging.
+4.  If there are no Sample Sources, use a professional and clear writing style suitable for a website.
+5.  If there are no True Sources, inform the user that factual content cannot be generated without them.
+6.  Return only the generated content, ready for use, without any explanations, metadata, or introductory/concluding remarks about the process.
+`
 )
 
 // WordPress Content Prompts
@@ -90,4 +119,16 @@ func indexOf(s, substr string) int {
 		}
 	}
 	return -1
+}
+
+// Function to format the new prompt
+func GetWordPressContentGenerateWithSourcesPrompt(trueSourcesContent, sampleSourcesContent, userRequest string) string {
+	// Handle cases where one type of source might be empty
+	if trueSourcesContent == "" {
+		trueSourcesContent = "(No True Sources Provided)"
+	}
+	if sampleSourcesContent == "" {
+		sampleSourcesContent = "(No Sample Sources Provided)"
+	}
+	return formatPrompt(WordPressContentGenerateWithSourcesPrompt, trueSourcesContent, sampleSourcesContent, userRequest)
 }
