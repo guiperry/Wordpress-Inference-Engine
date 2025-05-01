@@ -215,9 +215,17 @@ func (v *ContentManagerView) loadPageContent(pageID int) {
 			dialog.ShowError(fmt.Errorf("failed to load page content: %w", err), v.window)
 			return // Exit goroutine
 		}
-
-		// Update content editor and state (Ideally queue these)
-		v.contentEditor.SetText(content)
+		
+		const maxDisplayLength = 5000 // Adjust as needed, slightly less than capacity
+		displayContent := content
+		if len(content) > maxDisplayLength {
+			log.Printf("Truncating content for display (original length: %d)", len(content))
+			displayContent = content[:maxDisplayLength] + "\n... (Content Truncated)"
+		}
+		
+		log.Printf("Loading content for page %d, display length: %d", pageID, len(displayContent))
+		
+		v.contentEditor.SetText(displayContent) // Use truncated content
 		v.selectedPageID = pageID
 		v.saveButton.Enable()
 		v.loadContentButton.Enable()
