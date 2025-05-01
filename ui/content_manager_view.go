@@ -8,10 +8,11 @@ import (
 	"Inference_Engine/wordpress"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/widget"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/widget"
 )
 
 // ContentManagerView represents the WordPress content manager view
@@ -22,18 +23,19 @@ type ContentManagerView struct {
 	window           fyne.Window
 
 	// Status UI element
-	statusLabel     *widget.Label
+	statusLabel *widget.Label
 
 	// Content UI elements
-	pageList        *widget.List
-	contentEditor   *widget.Entry
-	saveButton      *widget.Button
+	pageList          *widget.List
+	contentEditor     *widget.Entry
+	saveButton        *widget.Button
 	loadContentButton *widget.Button
-	
+	previewImage      *canvas.Image // For displaying image previews
+
 	// Data
-	pages           wordpress.PageList
-	selectedPageID  int
-	
+	pages          wordpress.PageList
+	selectedPageID int
+
 	// Reference to content generator view (will be set after creation)
 	contentGeneratorView *ContentGeneratorView
 }
@@ -58,10 +60,10 @@ func (v *ContentManagerView) RefreshStatus() {
 		if len(v.pages) == 0 {
 			log.Println("ContentManagerView: Connected and page list empty, fetching pages...")
 			go v.fetchPages() // Fetch in the background
-			} else {
-				log.Println("ContentManagerView: Connected, pages already loaded.")
-			}
-			// --- END OF ADDED CODE ---
+		} else {
+			log.Println("ContentManagerView: Connected, pages already loaded.")
+		}
+		// --- END OF ADDED CODE ---
 	} else {
 		v.statusLabel.SetText("Status: Disconnected")
 		// Clear page list if disconnected
@@ -77,7 +79,6 @@ func (v *ContentManagerView) RefreshStatus() {
 	}
 	v.statusLabel.Refresh()
 }
-
 
 // NewContentManagerView creates a new WordPress content manager view
 func NewContentManagerView(wpService *wordpress.WordPressService, inferenceService *inference.InferenceService, window fyne.Window) *ContentManagerView {
@@ -96,7 +97,7 @@ func NewContentManagerView(wpService *wordpress.WordPressService, inferenceServi
 func (v *ContentManagerView) initialize() {
 	// Create status label
 	v.statusLabel = widget.NewLabel("Wordpress Connection Status: Initializing...")
-	
+
 	// Create content UI elements
 	v.pageList = widget.NewList(
 		func() int {
@@ -111,43 +112,68 @@ func (v *ContentManagerView) initialize() {
 			}
 		},
 	)
-	
+
 	v.pageList.OnSelected = func(id widget.ListItemID) {
 		if id < len(v.pages) {
 			v.loadPageContent(v.pages[id].ID)
+			// Load preview if link is available
+			if v.pages[id].Link != "" {
+				v.loadPagePreview(v.pages[id].Link)
+			}
 		}
 	}
-	
+
 	v.contentEditor = widget.NewMultiLineEntry()
 	v.contentEditor.SetPlaceHolder("Page content will appear here...")
 	v.contentEditor.Wrapping = fyne.TextWrapWord
-	
+
 	v.saveButton = widget.NewButton("Save Content", func() {
 		v.savePageContent()
 	})
 	v.saveButton.Disable() // Disable until a page is selected
-	
+
 	v.loadContentButton = widget.NewButton("Load to Generator", func() {
-		v.loadContentToGenerator()
+		v.loadSelectedContentToGenerator()
 	})
 	v.loadContentButton.Disable() // Disable until a page is selected
-	
+
+	// Initialize preview image
+	v.previewImage = &canvas.Image{
+		FillMode:  canvas.ImageFillOriginal,
+		ScaleMode: canvas.ImageScaleFastest,
+	}
+
+	v.previewImage.SetMinSize(fyne.NewSize(600, 350)) // Example: Set minimum width 200, height 150
+
 	// Create layout
-	contentContainer := container.NewVSplit(
+	editorAndPreview := container.NewVSplit(
+		container.NewScroll(v.contentEditor),
+		container.NewBorder(
+			widget.NewLabel("Preview:"),
+			nil, nil, nil,
+			container.NewScroll(v.previewImage),
+		),
+	)
+	editorAndPreview.Offset = 0.2 // 20% editor, 80% preview
+
+	rightPanel := container.NewBorder(
+		widget.NewLabel("Content:"),
+		container.NewHBox(layout.NewSpacer(), v.saveButton, v.loadContentButton),
+		nil,
+		nil,
+		editorAndPreview,
+	)
+
+	contentContainer := container.NewHSplit(
 		container.NewBorder(
 			widget.NewLabel("Pages:"),
 			nil, nil, nil,
 			container.NewScroll(v.pageList),
 		),
-		container.NewBorder(
-			widget.NewLabel("Content:"),
-			container.NewHBox(layout.NewSpacer(),v.saveButton, v.loadContentButton),
-			nil, nil,
-			container.NewScroll(v.contentEditor),
-		),
+		rightPanel,
 	)
-	contentContainer.SetOffset(0.3) // 30% for page list, 70% for content editor
-	
+	contentContainer.SetOffset(0.2) // 20% for page list, 80% for content editor
+
 	// Main layout with status label at top
 	v.container = container.NewBorder(
 		v.statusLabel,
@@ -159,18 +185,16 @@ func (v *ContentManagerView) initialize() {
 	v.RefreshStatus()
 }
 
-
-
 // fetchPages fetches the list of pages from the WordPress site
 func (v *ContentManagerView) fetchPages() {
 	// Show progress dialog
 	progress := dialog.NewProgressInfinite("Fetching", "Fetching pages...", v.window)
 	progress.Show()
-	
+
 	// Fetch pages in a goroutine
 	go func() {
 		// Fetch data first
-		pages, err := v.wpService.GetPages()
+		pages, err := v.wpService.GetPages(1, 10) // Get first batch with 10 pages
 
 		// --- UI Updates Start Here ---
 		// Hide the progress dialog *before* potentially showing another dialog or updating UI
@@ -199,7 +223,7 @@ func (v *ContentManagerView) loadPageContent(pageID int) {
 	// Show progress dialog
 	progress := dialog.NewProgressInfinite("Loading", "Loading page content...", v.window)
 	progress.Show()
-	
+
 	// Load content in a goroutine
 	go func() {
 		// Perform the content loading logic
@@ -215,16 +239,16 @@ func (v *ContentManagerView) loadPageContent(pageID int) {
 			dialog.ShowError(fmt.Errorf("failed to load page content: %w", err), v.window)
 			return // Exit goroutine
 		}
-		
+
 		const maxDisplayLength = 5000 // Adjust as needed, slightly less than capacity
 		displayContent := content
 		if len(content) > maxDisplayLength {
 			log.Printf("Truncating content for display (original length: %d)", len(content))
 			displayContent = content[:maxDisplayLength] + "\n... (Content Truncated)"
 		}
-		
+
 		log.Printf("Loading content for page %d, display length: %d", pageID, len(displayContent))
-		
+
 		v.contentEditor.SetText(displayContent) // Use truncated content
 		v.selectedPageID = pageID
 		v.saveButton.Enable()
@@ -239,19 +263,19 @@ func (v *ContentManagerView) savePageContent() {
 		dialog.ShowError(fmt.Errorf("no page selected"), v.window)
 		return
 	}
-	
+
 	content := v.contentEditor.Text
-	
+
 	// Confirm before saving
 	dialog.ShowConfirm("Save Changes", "Are you sure you want to save these changes to the WordPress page?", func(confirmed bool) {
 		if !confirmed {
 			return
 		}
-		
+
 		// Show progress dialog
 		progress := dialog.NewProgressInfinite("Saving", "Saving page content...", v.window)
 		progress.Show()
-		
+
 		// Save content in a goroutine
 		go func() {
 			// Perform the save operation
@@ -274,42 +298,66 @@ func (v *ContentManagerView) savePageContent() {
 	}, v.window)
 }
 
-// loadContentToGenerator loads the current page content to the content generator
-func (v *ContentManagerView) loadContentToGenerator() {
+// loadSelectedContentToGenerator fetches the *text* content for the selected page,
+// sends it to the generator view, and then clears the manager view.
+func (v *ContentManagerView) loadSelectedContentToGenerator() {
 	if v.selectedPageID < 0 {
 		dialog.ShowError(fmt.Errorf("no page selected"), v.window)
 		return
 	}
-	
 	if v.contentGeneratorView == nil {
-		dialog.ShowError(fmt.Errorf("content generator view not initialized"), v.window)
+		dialog.ShowError(fmt.Errorf("content generator view not available"), v.window)
 		return
 	}
-	
-	// Get the selected page
+
+	// Find the selected page details (needed for title)
 	var selectedPage *wordpress.Page
-	for i, page := range v.pages {
-		if page.ID == v.selectedPageID {
+	for i := range v.pages {
+		if v.pages[i].ID == v.selectedPageID {
 			selectedPage = &v.pages[i]
 			break
 		}
 	}
-	
 	if selectedPage == nil {
-		dialog.ShowError(fmt.Errorf("selected page not found"), v.window)
+		dialog.ShowError(fmt.Errorf("selected page details not found"), v.window)
 		return
 	}
-	
-	// Add the content to the generator
-	v.contentGeneratorView.AddSourceContent(
-		selectedPage.Title,
-		v.contentEditor.Text,
-		"WordPress",
-		selectedPage.ID,
-		false,
-	)
-	
-	dialog.ShowInformation("Success", fmt.Sprintf("Added '%s' to content generator", selectedPage.Title), v.window)
+
+	// Fetch the actual content (text) on demand
+	progress := dialog.NewProgressInfinite("Loading Content", "Fetching page content for generator...", v.window)
+	progress.Show()
+
+	go func() {
+		defer progress.Hide()
+		content, err := v.wpService.GetPageContent(v.selectedPageID) // Still need this function!
+		if err != nil {
+			log.Printf("Error loading page content for generator: %v", err)
+			dialog.ShowError(fmt.Errorf("failed to load content for '%s': %w", selectedPage.Title, err), v.window)
+			return
+		}
+
+		// Add the fetched content to the generator
+		v.contentGeneratorView.AddSourceContent(
+			selectedPage.Title,
+			content, // The actual text content
+			"WordPress",
+			selectedPage.ID,
+			false,
+		)
+
+		// --- Add code to clear the UI elements ---
+		v.contentEditor.SetText("")    // Clear the editor
+		v.previewImage.Resource = nil  // Clear the preview image resource
+		v.previewImage.Refresh()       // Refresh the image widget
+		v.selectedPageID = -1          // Reset selected ID
+		v.saveButton.Disable()         // Disable save button
+		v.loadContentButton.Disable()  // Disable load button
+		v.pageList.UnselectAll()       // Unselect item in the list
+		log.Println("ContentManagerView: Cleared editor and preview after loading to generator.")
+		// --- End of added code ---
+
+		dialog.ShowInformation("Content Added", fmt.Sprintf("Added content of '%s' to content generator and cleared manager view.", selectedPage.Title), v.window)
+	}()
 }
 
 // SetContentGeneratorView sets the reference to the content generator view
@@ -367,4 +415,39 @@ func (v *ContentManagerView) SelectPageByIndex(index int) {
 // GetPageCount returns the number of pages
 func (v *ContentManagerView) GetPageCount() int {
 	return len(v.pages)
+}
+
+// loadPagePreview triggers the screenshot capture and updates the image widget.
+func (v *ContentManagerView) loadPagePreview(pageURL string) {
+	if pageURL == "" {
+		v.previewImage.Resource = nil // Clear image if no URL
+		v.previewImage.Refresh()
+		return
+	}
+
+	// Show progress indicator
+	progress := dialog.NewProgressInfinite("Loading Preview", "Capturing page screenshot...", v.window)
+	progress.Show()
+	v.previewImage.Resource = nil // Clear previous image while loading
+	v.previewImage.Refresh()
+
+	go func() {
+		defer progress.Hide() // Ensure progress dialog is hidden
+
+		imgBytes, err := v.wpService.GetPageScreenshot(pageURL)
+		if err != nil {
+			log.Printf("Error getting page screenshot: %v", err)
+			dialog.ShowError(fmt.Errorf("failed to load preview for %s: %w", pageURL, err), v.window)
+			v.previewImage.Resource = nil // Ensure image is cleared on error
+			v.previewImage.Refresh()
+			return
+		}
+
+		// Create Fyne resource from image bytes
+		imgResource := fyne.NewStaticResource(fmt.Sprintf("preview_%d.png", v.selectedPageID), imgBytes) // Use PNG if GetPageScreenshot returns PNG
+
+		// Update the image widget
+		v.previewImage.Resource = imgResource
+		v.previewImage.Refresh()
+	}()
 }

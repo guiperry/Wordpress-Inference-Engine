@@ -2,6 +2,7 @@ package wordpress
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,11 +12,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"strconv"
-	
+
+	"github.com/chromedp/chromedp"
 )
 
 // WordPressService manages the interaction with a WordPress site via the REST API
@@ -54,17 +56,17 @@ type PageList []Page
 // NewWordPressService creates a new instance of WordPressService
 func NewWordPressService() *WordPressService {
 	service := &WordPressService{
-		client:           &http.Client{
+		client: &http.Client{
 			Timeout: 30 * time.Second, // <-- Add a reasonable timeout (e.g., 30 seconds)
 		},
-		savedSites:       []SavedSite{},
-		currentSiteName:  "",
+		savedSites:         []SavedSite{},
+		currentSiteName:    "",
 		siteChangeCallback: nil,
 	}
-	
+
 	// Load saved sites
 	service.LoadSavedSites()
-	
+
 	return service
 }
 
@@ -74,26 +76,26 @@ func (s *WordPressService) GetConfigDir() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to get user home directory: %w", err)
 	}
-	
+
 	configDir := filepath.Join(homeDir, ".wordpress-inference")
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		return "", fmt.Errorf("failed to create config directory: %w", err)
 	}
-	
+
 	return configDir, nil
 }
 
 func (s *WordPressService) GetCurrentSiteName() string {
-    s.mutex.Lock()
-    defer s.mutex.Unlock()
-    return s.currentSiteName
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return s.currentSiteName
 }
 
 // SaveSite saves a site's credentials to the configuration file
 func (s *WordPressService) SaveSite(name, siteURL, username, appPassword string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	// Check if site with this name already exists
 	for i, site := range s.savedSites {
 		if site.Name == name {
@@ -105,7 +107,7 @@ func (s *WordPressService) SaveSite(name, siteURL, username, appPassword string)
 			return s.saveSitesToFile()
 		}
 	}
-	
+
 	// Add new site
 	s.savedSites = append(s.savedSites, SavedSite{
 		Name:        name,
@@ -117,7 +119,7 @@ func (s *WordPressService) SaveSite(name, siteURL, username, appPassword string)
 	if s.siteChangeCallback != nil {
 		s.siteChangeCallback()
 	}
-	
+
 	return s.saveSitesToFile()
 }
 
@@ -127,18 +129,18 @@ func (s *WordPressService) saveSitesToFile() error {
 	if err != nil {
 		return err
 	}
-	
+
 	sitesFile := filepath.Join(configDir, "saved_sites.json")
-	
+
 	data, err := json.MarshalIndent(s.savedSites, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal saved sites: %w", err)
 	}
-	
+
 	if err := os.WriteFile(sitesFile, data, 0600); err != nil {
 		return fmt.Errorf("failed to write saved sites file: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -146,30 +148,30 @@ func (s *WordPressService) saveSitesToFile() error {
 func (s *WordPressService) LoadSavedSites() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	configDir, err := s.GetConfigDir()
 	if err != nil {
 		return err
 	}
-	
+
 	sitesFile := filepath.Join(configDir, "saved_sites.json")
-	
+
 	// Check if file exists
 	if _, err := os.Stat(sitesFile); os.IsNotExist(err) {
 		// File doesn't exist, initialize with empty list
 		s.savedSites = []SavedSite{}
 		return nil
 	}
-	
+
 	data, err := os.ReadFile(sitesFile)
 	if err != nil {
 		return fmt.Errorf("failed to read saved sites file: %w", err)
 	}
-	
+
 	if err := json.Unmarshal(data, &s.savedSites); err != nil {
 		return fmt.Errorf("failed to unmarshal saved sites: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -177,11 +179,11 @@ func (s *WordPressService) LoadSavedSites() error {
 func (s *WordPressService) GetSavedSites() []SavedSite {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	// Return a copy to avoid race conditions
 	sites := make([]SavedSite, len(s.savedSites))
 	copy(sites, s.savedSites)
-	
+
 	return sites
 }
 
@@ -189,7 +191,7 @@ func (s *WordPressService) GetSavedSites() []SavedSite {
 func (s *WordPressService) GetSavedSite(name string) (SavedSite, bool) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	for _, site := range s.savedSites {
 		if site.Name == name {
 			// Return a copy with decrypted password
@@ -201,7 +203,7 @@ func (s *WordPressService) GetSavedSite(name string) (SavedSite, bool) {
 			}, true
 		}
 	}
-	
+
 	return SavedSite{}, false
 }
 
@@ -209,7 +211,7 @@ func (s *WordPressService) GetSavedSite(name string) (SavedSite, bool) {
 func (s *WordPressService) DeleteSavedSite(name string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	for i, site := range s.savedSites {
 		if site.Name == name {
 			// Remove site from slice
@@ -217,7 +219,7 @@ func (s *WordPressService) DeleteSavedSite(name string) error {
 			return s.saveSitesToFile()
 		}
 	}
-	
+
 	return fmt.Errorf("site with name '%s' not found", name)
 }
 
@@ -307,7 +309,6 @@ func (s *WordPressService) Connect(siteURL, username, appPassword string) error 
 	defer resp.Body.Close()
 	log.Printf("wpService.Connect: client.Do(req) finished. Response Status: %s", resp.Status)
 
-
 	// Check response status code
 	log.Printf("wpService.Connect: Response status code: %d", resp.StatusCode)
 	if resp.StatusCode != http.StatusOK {
@@ -360,7 +361,7 @@ func (s *WordPressService) IsConnected() bool {
 }
 
 // GetPages fetches a list of pages from the WordPress site using pagination
-func (s *WordPressService) GetPages() (PageList, error) {
+func (s *WordPressService) GetPages(page, perPage int) (PageList, error) {
 	s.mutex.Lock()
 	if !s.isConnected {
 		s.mutex.Unlock()
@@ -373,14 +374,14 @@ func (s *WordPressService) GetPages() (PageList, error) {
 
 	var allPages []map[string]interface{} // Store results from all pages
 	currentPage := 1
-	perPage := 10 // Fetch 10 pages per request
+	perPage = 10 // Fetch 10 pages per request
 	totalPages := 1 // Initialize to 1, will be updated after the first request
 
 	log.Printf("wpService.GetPages: Starting pagination fetch (perPage=%d)", perPage)
 
 	for { // Loop indefinitely until we determine total pages or finish
 		// Create request URL with pagination parameters
-		requestURL := fmt.Sprintf("%swp-json/wp/v2/pages?per_page=%d&page=%d&orderby=id&order=asc", siteURL, perPage, currentPage)
+		requestURL := fmt.Sprintf("%swp-json/wp/v2/pages?per_page=%d&page=%d&orderby=id&order=asc&_fields=id,title,content,slug,link", siteURL, perPage, currentPage)
 		log.Printf("wpService.GetPages: Fetching page %d from URL: %s", currentPage, requestURL)
 
 		// Create request
@@ -417,7 +418,6 @@ func (s *WordPressService) GetPages() (PageList, error) {
 			}
 		}
 		// --- End Header Check ---
-
 
 		// Check response status
 		if resp.StatusCode != http.StatusOK {
@@ -500,6 +500,7 @@ func (s *WordPressService) GetPages() (PageList, error) {
 	log.Printf("wpService.GetPages: Successfully converted %d pages to PageList.", len(pageList))
 	return pageList, nil
 }
+
 // GetPageContent fetches the content of a specific page
 func (s *WordPressService) GetPageContent(pageID int) (string, error) {
 	s.mutex.Lock()
@@ -514,7 +515,7 @@ func (s *WordPressService) GetPageContent(pageID int) (string, error) {
 
 	// Create request URL
 	requestURL := fmt.Sprintf("%swp-json/wp/v2/pages/%d", siteURL, pageID)
-	
+
 	req, err := http.NewRequest("GET", requestURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
@@ -569,12 +570,12 @@ func (s *WordPressService) UpdatePageContent(pageID int, newContent string) erro
 
 	// Create request URL
 	requestURL := fmt.Sprintf("%swp-json/wp/v2/pages/%d", siteURL, pageID)
-	
+
 	// Create request body
 	requestBody := map[string]interface{}{
 		"content": newContent,
 	}
-	
+
 	bodyJSON, err := json.Marshal(requestBody)
 	if err != nil {
 		return fmt.Errorf("failed to create request body: %w", err)
@@ -610,13 +611,13 @@ func (s *WordPressService) UpdatePageContent(pageID int, newContent string) erro
 func (s *WordPressService) Disconnect() {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	s.isConnected = false
 	s.siteURL = ""
 	s.username = ""
 	s.appPassword = ""
 	s.currentSiteName = ""
-	
+
 	if s.siteChangeCallback != nil {
 		s.siteChangeCallback()
 	}
@@ -628,3 +629,66 @@ func (s *WordPressService) SetSiteChangeCallback(callback func()) {
 	defer s.mutex.Unlock()
 	s.siteChangeCallback = callback
 }
+
+// GetPageScreenshot captures a screenshot of a given URL.
+// Returns PNG image bytes or an error.
+func (s *WordPressService) GetPageScreenshot(pageURL string) ([]byte, error) {
+	if pageURL == "" {
+		return nil, fmt.Errorf("page URL cannot be empty")
+	}
+
+	log.Printf("Attempting to capture screenshot for: %s", pageURL)
+
+	// --- Chromedp Setup ---
+	// Consider creating context options once, e.g., disabling headless for debugging
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		// chromedp.Flag("headless", false), // Uncomment for debugging
+		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("no-sandbox", true),            // Often needed in containerized environments
+		chromedp.Flag("disable-dev-shm-usage", true), // Often needed in containerized environments
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
+	defer cancelAlloc()
+
+	// Create context
+	ctx, cancelCtx := chromedp.NewContext(allocCtx, chromedp.WithLogf(log.Printf))
+	defer cancelCtx()
+
+	// Create a timeout context
+	timeoutCtx, cancelTimeout := context.WithTimeout(ctx, 60*time.Second) // 60-second timeout
+	defer cancelTimeout()
+	// --- End Chromedp Setup ---
+
+	var buf []byte
+	// Capture screenshot
+	err := chromedp.Run(timeoutCtx,
+		// Set viewport size if desired (optional)
+		// emulation.SetDeviceMetricsOverride(1280, 800, 1, false),
+		chromedp.Navigate(pageURL),
+		// Wait for page load (adjust selector or wait time as needed)
+		// chromedp.WaitVisible(`body`, chromedp.ByQuery), // Wait for body tag
+		chromedp.Sleep(3*time.Second), // Simple wait, adjust as needed
+		// Capture screenshot
+		chromedp.FullScreenshot(&buf, 90), // 90% quality JPEG, use 0 for PNG
+		// Or capture specific element:
+		// chromedp.Screenshot(`#main-content`, &buf, chromedp.NodeVisible, chromedp.ByID),
+	)
+
+	if err != nil {
+		log.Printf("Chromedp error capturing screenshot for %s: %v", pageURL, err)
+		return nil, fmt.Errorf("failed to capture screenshot: %w", err)
+	}
+
+	if len(buf) == 0 {
+		log.Printf("Captured empty screenshot for %s", pageURL)
+		return nil, fmt.Errorf("captured empty screenshot")
+	}
+
+	log.Printf("Successfully captured screenshot for %s (size: %d bytes)", pageURL, len(buf))
+	return buf, nil
+}
+
+// Ensure your Page struct includes the public URL ('Link')
+// You might need to adjust GetPages to fetch this field if it doesn't already.
+// Example modification in GetPages:
+// req.Param("fields", "id,title,status,link") // Add 'link' to fields

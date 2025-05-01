@@ -3,7 +3,7 @@ package main
 import (
 	"fmt" // Import fmt
 	"log"
-
+	
 	"Inference_Engine/inference"
 	"Inference_Engine/ui"
 
@@ -19,6 +19,11 @@ import (
 )
 
 func main() {
+
+	// --- Setup Logging Early ---
+	// Keep original log output
+	originalLogOutput := log.Writer()
+
 	// Load .env file contents into environment variables
 	err := godotenv.Load()
 	if err != nil {
@@ -35,9 +40,23 @@ func main() {
 	wpService := wordpress.NewWordPressService()
 
 	// ... (updateWindowTitle logic remains the same) ...
-	updateWindowTitle := func() { /* ... */ }
+	updateWindowTitle := func() {
+		title := "Wordpress Inference Engine"
+		if wpService != nil && wpService.IsConnected() {
+			siteName := wpService.GetCurrentSiteName()
+			if siteName != "" {
+				title = fmt.Sprintf("%s - %s", title, siteName)
+			} else {
+				title = fmt.Sprintf("%s - Connected", title)
+			}
+		}
+		w.SetTitle(title)
+	}
 	updateWindowTitle()
-	if wpService != nil { wpService.SetSiteChangeCallback(updateWindowTitle) }
+	if wpService != nil {
+		wpService.SetSiteChangeCallback(updateWindowTitle)
+	}
+
 
 
 	// Try to start the inference service (which now configures both LLMs)
@@ -54,10 +73,23 @@ func main() {
 	contentGeneratorView := ui.NewContentGeneratorView(wpService, inferenceService, w)
 	inferenceSettingsView := ui.NewInferenceSettingsView(inferenceService, w)
 	wordpressSettingsView := ui.NewWordPressSettingsView(wpService, w)
-	testInferenceView := ui.NewTestInferenceView(inferenceService, w) 
-
-	// This needs to happen after both views are created.
+	inferenceChatView := ui.NewInferenceChatView(inferenceService, w) // <-- Renamed view instance
+	testInferenceView := ui.NewTestInferenceView(inferenceService, w)   // <-- New view instance
+	
+	// Link manager and generator
 	contentManagerView.SetContentGeneratorView(contentGeneratorView)
+	
+
+	// --- Setup Log Redirection ---
+	logConsoleWidget := testInferenceView.LogConsoleWidget()
+	if logConsoleWidget != nil {
+		logWriter := ui.NewUILogWriter(logConsoleWidget, originalLogOutput)
+		log.SetOutput(logWriter)
+		log.Println("--- Log output redirected to UI console ---")
+	} else {
+		log.Println("Error: Could not get log console widget, log redirection skipped.")
+	}
+	// --- End Log Redirection ---
 
 	// Combine settings views
 	settingsContent := container.NewAdaptiveGrid(2, // <--- Changed from NewVBox
@@ -72,6 +104,7 @@ func main() {
 		container.NewTabItem("Manager", contentManagerView.Container()),
 		container.NewTabItem("Generator", contentGeneratorView.Container()),
 		container.NewTabItem("Settings", container.NewScroll(settingsContent)),
+		container.NewTabItem("Inference Chat", inferenceChatView.Container()), // <-- Renamed tab
 		container.NewTabItem("Test Inference", testInferenceView.Container()),
 	)
 
@@ -94,10 +127,13 @@ func main() {
 		if err := inferenceService.Stop(); err != nil {
 			log.Printf("Error stopping inference service: %v", err)
 		}
+		// --- Restore Original Log Output ---
+		log.SetOutput(originalLogOutput)
+		// --- End Restore ---
 		w.Close()
 	})
 
 	w.SetContent(tabs)
-	w.Resize(fyne.NewSize(900, 700))
+	w.Resize(fyne.NewSize(1064, 700))
 	w.ShowAndRun()
 }

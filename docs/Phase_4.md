@@ -137,7 +137,7 @@ func (v *ContentManagerView) initialize() {
 You'll need a function in your WordPressService (or a dedicated PreviewService) to handle the screenshot capture using chromedp.
 
 go
-// In wordpress/service.go (or a new preview service)
+// In wordpress/wordpress_service.go (or a new preview service)
 
 import (
 	"context"
@@ -321,7 +321,7 @@ func (v *ContentManagerView) loadSelectedContentToGenerator() {
 Make sure your GetPages function in the wordpress service fetches the link field for each page, as this is needed for the public URL to capture the screenshot.
 
 go
-// In wordpress/service.go GetPages() function (example)
+// In wordpress/wordpress_service.go GetPages() function (example)
 func (s *WordPressService) GetPages(page, perPage int) (PageList, int, error) {
 	// ... existing setup ...
 	req := s.client.Pages.List(context.Background(), &wordpress.PageListOptions{

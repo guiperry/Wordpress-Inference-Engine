@@ -1,26 +1,75 @@
+// /home/gperry/Documents/GitHub/Inc-Line/Wordpress-Inference-Engine/ui/test_inference_view.go
 package ui
 
 import (
 	"fmt"
+	"io"
 	"log"
+	"strings"
+	"sync"
 
-	"Inference_Engine/inference" // Assuming your inference package path
+	"Inference_Engine/inference"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/dialog" // Import layout
 	"fyne.io/fyne/v2/widget"
 )
 
-// TestInferenceView represents the UI for the Test Inference tab
+// uiLogWriter struct and NewUILogWriter remain the same...
+type uiLogWriter struct {
+	logOutput    *widget.Entry
+	originalOut  io.Writer
+	mu           sync.Mutex
+	buffer       []byte
+	maxLogLength int
+}
+
+func NewUILogWriter(logWidget *widget.Entry, original io.Writer) *uiLogWriter {
+	return &uiLogWriter{
+		logOutput:    logWidget,
+		originalOut:  original,
+		maxLogLength: 10000,
+	}
+}
+
+func (w *uiLogWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Write to original output if set
+	if w.originalOut != nil {
+		w.originalOut.Write(p)
+	}
+
+	// Append to buffer and process complete lines
+	w.buffer = append(w.buffer, p...)
+	for strings.Contains(string(w.buffer), "\n") {
+		idx := strings.Index(string(w.buffer), "\n")
+		line := string(w.buffer[:idx+1])
+		w.buffer = w.buffer[idx+1:]
+
+		// Update UI log widget
+		w.logOutput.SetText(w.logOutput.Text + line)
+
+		// Trim log if too long
+		if len(w.logOutput.Text) > w.maxLogLength {
+			w.logOutput.SetText(w.logOutput.Text[len(w.logOutput.Text)-w.maxLogLength:])
+		}
+	}
+
+	return len(p), nil
+}
+
+// TestInferenceView represents the UI for the new Test Inference tab
 type TestInferenceView struct {
 	container        fyne.CanvasObject
 	inferenceService *inference.InferenceService
 	window           fyne.Window
 
-	promptInput    *widget.Entry
-	responseOutput *widget.Entry
-	testButton     *widget.Button
+	fallbackButton *widget.Button
+	testMOAButton  *widget.Button // <-- ADDED: MOA test button
+	logConsole     *widget.Entry
 }
 
 // NewTestInferenceView creates a new TestInferenceView
@@ -35,84 +84,107 @@ func NewTestInferenceView(service *inference.InferenceService, win fyne.Window) 
 
 // initialize sets up the UI elements for the view
 func (v *TestInferenceView) initialize() {
-	v.promptInput = widget.NewMultiLineEntry()
-	v.promptInput.SetPlaceHolder("Enter a prompt to test the inference engine...")
-	v.promptInput.Wrapping = fyne.TextWrapWord
-	v.promptInput.SetMinRowsVisible(10)
+	v.fallbackButton = widget.NewButton("Trigger Fallback Test (Oversize Prompt)", v.handleFallbackTest)
 
-	v.responseOutput = widget.NewMultiLineEntry()
-	v.responseOutput.SetPlaceHolder("Response will appear here...")
-	v.responseOutput.Wrapping = fyne.TextWrapWord
-	v.responseOutput.MultiLine = true
-	v.responseOutput.SetMinRowsVisible(10)
+	// --- ADDED: MOA Test Button ---
+	v.testMOAButton = widget.NewButton("Test with MOA (Simple Prompt)", v.handleMOATest)
+	// --- End Added ---
 
-	v.testButton = widget.NewButton("Test Inference", v.handleTestInference)
+	v.logConsole = widget.NewMultiLineEntry()
+	v.logConsole.SetPlaceHolder("Application logs will appear here...")
+	v.logConsole.Wrapping = fyne.TextWrapOff // Keep lines intact
+	v.logConsole.MultiLine = true
+	
 
-	promptArea := container.NewBorder(
-		widget.NewLabel("Test Prompt:"), // Top
-		v.testButton,                    // Bottom
-		nil,                             // Left
-		nil,                             // Right
-		container.NewScroll(v.promptInput), // Center - Scroll expands
+	// --- Update Layout ---
+	topPanel := container.NewVBox(
+		widget.NewLabel("Test Inference Mechanisms"),
+		v.fallbackButton,
+		v.testMOAButton, // Add MOA button
 	)
 
-	responseArea := container.NewBorder(
-		widget.NewLabel("Response:"),        // Top
-		nil,                                 // Bottom
-		nil,                                 // Left
-		nil,                                 // Right
-		container.NewScroll(v.responseOutput), // Center - Scroll expands
+	v.container = container.NewBorder(
+		topPanel,                          // Top
+		nil,                               // Bottom
+		nil,                               // Left
+		nil,                               // Right
+		container.NewScroll(v.logConsole), // Center - Log console takes remaining space
 	)
-
-	v.container = container.NewVSplit(
-		promptArea,
-		responseArea,
-	)
-	// You might need to explicitly cast v.container to *container.Split if SetOffset is needed immediately
-	if split, ok := v.container.(*container.Split); ok {
-		split.SetOffset(0.4) // Adjust split ratio if needed
-	}
 }
 
-// handleTestInference contains the logic executed when the test button is pressed
-func (v *TestInferenceView) handleTestInference() {
-	prompt := v.promptInput.Text
-	if prompt == "" {
-		dialog.ShowInformation("Error", "Please enter a prompt", v.window)
+// handleFallbackTest sends an oversized prompt to trigger the fallback
+func (v *TestInferenceView) handleFallbackTest() {
+	if !v.inferenceService.IsRunning() { /* ... service not running dialog ... */
 		return
 	}
 
-	if !v.inferenceService.IsRunning() {
-		dialog.ShowInformation("Error", "Inference service is not running. Check settings and logs.", v.window)
-		return
-	}
+	// Create oversized prompt
+	log.Println("UI: Preparing oversized prompt for fallback test...")
+	oversizedPrompt := strings.Repeat("This is part of a very long test prompt designed to exceed the context window limit... ", 300)
+	log.Printf("UI: Oversized prompt length: %d chars", len(oversizedPrompt))
 
-	// Show a loading indicator
-	progress := dialog.NewProgressInfinite("Generating", "Sending prompt to "+v.inferenceService.GetName()+"...", v.window)
+	progressMsg := "Sending oversized prompt via Delegator..."
+	log.Printf("UI: Initiating fallback test...")
+	progress := dialog.NewProgressInfinite("Testing Fallback", progressMsg, v.window)
 	progress.Show()
 
-	// Run in a goroutine to avoid blocking the UI
 	go func() {
-		// Defer hiding the progress indicator to ensure it closes even on error
 		defer progress.Hide()
-
-		response, err := v.inferenceService.GenerateText(prompt)
+		// Call the standard GenerateText - the delegator handles the fallback
+		response, err := v.inferenceService.GenerateText(oversizedPrompt) // Use standard GenerateText
 
 		if err != nil {
-			log.Printf("UI Error: Test generation failed: %v", err)
-			// Ensure dialogs are shown on the main thread if necessary,
-			// but Fyne's dialogs are generally safe.
-			dialog.ShowError(err, v.window)
-			v.responseOutput.SetText(fmt.Sprintf("ERROR:\n%v", err)) // Show error in output
+			log.Printf("UI Error: Fallback test failed: %v", err)
+			dialog.ShowError(fmt.Errorf("Fallback test failed:\n%w\n\nCheck log console for details.", err), v.window)
 			return
 		}
-
-		v.responseOutput.SetText(response)
-		log.Printf("UI: Test generation successful.") // Shorter log message
+		log.Printf("UI: Fallback test completed successfully (response length: %d). Check log console for trace.", len(response))
+		dialog.ShowInformation("Fallback Test Complete", "Request finished. Check the log console below for the trace (Proxy failure -> Base success).", v.window)
 	}()
 }
+
+// --- ADDED: handleMOATest ---
+// handleMOATest sends a simple prompt directly to the MOA service
+func (v *TestInferenceView) handleMOATest() {
+	if !v.inferenceService.IsRunning() {
+		dialog.ShowInformation("Service Error", "Inference service is not running. Check settings and logs.", v.window)
+		return
+	}
+
+	// Use a simple, standard prompt for MOA testing
+	testPrompt := "Explain the concept of a Mixture of Agents (MOA) in large language models in a concise paragraph."
+	log.Println("UI: Preparing simple prompt for MOA test...")
+
+	progressMsg := "Sending prompt directly to MOA..."
+	log.Printf("UI: Initiating MOA test...")
+	progress := dialog.NewProgressInfinite("Testing MOA", progressMsg, v.window)
+	progress.Show()
+
+	go func() {
+		defer progress.Hide()
+		// Call the specific MOA generation method
+		response, err := v.inferenceService.GenerateTextWithMOA(testPrompt) // Use GenerateTextWithMOA
+
+		if err != nil {
+			log.Printf("UI Error: MOA test failed: %v", err)
+			dialog.ShowError(fmt.Errorf("MOA test failed:\n%w\n\nCheck log console for details.", err), v.window)
+			return
+		}
+		log.Printf("UI: MOA test completed successfully (response length: %d). Check log console for trace.", len(response))
+		dialog.ShowInformation("MOA Test Complete", "Request finished via MOA. Check the log console below for the trace.", v.window)
+		// Optionally, display the MOA response somewhere if needed,
+		// but the primary goal here is observing the logs.
+	}()
+}
+
+// --- End Added ---
 
 // Container returns the main container for this view
 func (v *TestInferenceView) Container() fyne.CanvasObject {
 	return v.container
+}
+
+// LogConsoleWidget returns the log console widget for log redirection
+func (v *TestInferenceView) LogConsoleWidget() *widget.Entry {
+	return v.logConsole
 }

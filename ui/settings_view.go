@@ -55,6 +55,7 @@ func NewWordPressSettingsView(wpService *wordpress.WordPressService, window fyne
 	}
 	view.initialize()
 	view.refreshSavedSites()
+	view.updateConnectButtonState() // <-- Add initial state update
 	return view
 }
 
@@ -75,9 +76,7 @@ func (v *WordPressSettingsView) initialize() {
 
 	v.rememberCheck = widget.NewCheck("Remember Me", nil)
 
-	v.connectButton = widget.NewButton("Connect", func() {
-		v.connectToWordPress()
-	})
+	v.connectButton = widget.NewButton("Connect", nil) // Action set later by updateConnectButtonState
 
 	v.statusLabel = widget.NewLabel("Status: Disconnected")
 
@@ -162,8 +161,6 @@ type InferenceSettingsView struct {
 	window           fyne.Window
 
 	// UI elements
-	providerSelect   *widget.Select
-	openaiKeyEntry   *widget.Entry
 	cerebrasKeyEntry *widget.Entry
 	modelEntry       *widget.Entry
 }
@@ -200,7 +197,9 @@ func (v *InferenceSettingsView) initialize() {
 		}
 	})
 	v.cerebrasKeyEntry.OnChanged = func(_ string) {
-		if v.cerebrasKeyEntry.Disabled() { v.cerebrasKeyEntry.Enable() }
+		if v.cerebrasKeyEntry.Disabled() {
+			v.cerebrasKeyEntry.Enable()
+		}
 	}
 
 	// --- Add Gemini Key Input ---
@@ -219,9 +218,10 @@ func (v *InferenceSettingsView) initialize() {
 		}
 	})
 	geminiKeyEntry.OnChanged = func(_ string) {
-		if geminiKeyEntry.Disabled() { geminiKeyEntry.Enable() }
+		if geminiKeyEntry.Disabled() {
+			geminiKeyEntry.Enable()
+		}
 	}
-
 
 	// Model Selection (Let's configure the Proxy/Cerebras model here)
 	v.modelEntry = widget.NewEntry()
@@ -230,7 +230,9 @@ func (v *InferenceSettingsView) initialize() {
 
 	setModelButton := widget.NewButton("Set Proxy Model", func() { // Update button text
 		model := v.modelEntry.Text
-		if model == "" { /* show info */ return }
+		if model == "" { /* show info */
+			return
+		}
 		// Use SetProxyModel
 		err := v.inferenceService.SetProxyModel(model)
 		if err != nil {
@@ -240,10 +242,9 @@ func (v *InferenceSettingsView) initialize() {
 		}
 	})
 
-    // Optional: Add entry and button for setting Base (Gemini) model if desired
-    // baseModelEntry := widget.NewEntry() ...
-    // setBaseModelButton := widget.NewButton("Set Base Model", ...) ...
-
+	// Optional: Add entry and button for setting Base (Gemini) model if desired
+	// baseModelEntry := widget.NewEntry() ...
+	// setBaseModelButton := widget.NewButton("Set Base Model", ...) ...
 
 	// Create layout
 	v.container = container.NewVBox(
@@ -253,16 +254,17 @@ func (v *InferenceSettingsView) initialize() {
 		widget.NewLabel("Proxy Model (Cerebras):"), // Update label
 		v.modelEntry,
 		setModelButton,
-        // Optional: Add Base Model widgets here
+		// Optional: Add Base Model widgets here
 		widget.NewSeparator(),
 		widget.NewLabel("API Keys (Set Environment Variable & Restart):"),
 		v.cerebrasKeyEntry,
 		saveCerebrasButton,
-		geminiKeyEntry, // Add Gemini key entry
+		geminiKeyEntry,   // Add Gemini key entry
 		saveGeminiButton, // Add Gemini save button
 		// Remove OpenAI widgets
 	)
 }
+
 // Container returns the container for the Inference Settings view
 // This method was added to fix the error in main.go
 func (v *InferenceSettingsView) Container() fyne.CanvasObject {
@@ -272,6 +274,44 @@ func (v *InferenceSettingsView) Container() fyne.CanvasObject {
 // Container returns the container for the WordPress Settings view
 func (v *WordPressSettingsView) Container() fyne.CanvasObject {
 	return v.container
+}
+
+// updateConnectButtonState updates the connect button's text and action
+func (v *WordPressSettingsView) updateConnectButtonState() {
+	if v.wpService == nil {
+		log.Println("WordPressSettingsView: Cannot update button state, wpService is nil")
+		v.connectButton.SetText("Connect")
+		v.connectButton.OnTapped = nil // Or set to a function showing an error
+		v.connectButton.Disable()      // Disable if service is missing
+		return
+	}
+
+	v.connectButton.Enable() // Ensure button is enabled unless explicitly disabled elsewhere
+
+	if v.wpService.IsConnected() {
+		v.connectButton.SetText("Disconnect")
+		v.connectButton.OnTapped = func() {
+			log.Println("Disconnect button tapped.")
+			// Call the disconnect method on the service
+			v.wpService.Disconnect()
+			// Update UI elements after disconnect
+			v.statusLabel.SetText("Status: Disconnected")
+			v.statusLabel.Refresh()
+			v.updateConnectButtonState() // Update the button itself
+			// Notify other parts of the app if needed
+			if v.onConnectionChanged != nil {
+				v.onConnectionChanged(false)
+			}
+			log.Println("Disconnect sequence complete.")
+		}
+	} else {
+		v.connectButton.SetText("Connect")
+		v.connectButton.OnTapped = func() {
+			// Call the existing connect function
+			v.connectToWordPress()
+		}
+	}
+	v.connectButton.Refresh() // Refresh the button to show text change
 }
 
 // connectToWordPress connects to the WordPress site
@@ -293,7 +333,9 @@ func (v *WordPressSettingsView) connectToWordPress() {
 	log.Println("connectToWordPress: Updating status to Connecting and disabling button.")
 	v.statusLabel.SetText("Status: Connecting...")
 	v.statusLabel.Refresh()   // Ensure UI updates
-	v.connectButton.Disable() // Disable button during connection attempt
+	// v.connectButton.Disable() // Don't disable, let updateConnectButtonState handle it if needed
+	v.connectButton.SetText("Connecting...") // Optionally change text during attempt
+	v.connectButton.Refresh()
 
 	// Show progress dialog
 	log.Println("connectToWordPress: Showing progress dialog.")
@@ -318,7 +360,7 @@ func (v *WordPressSettingsView) connectToWordPress() {
 		log.Println("connectToWordPress (goroutine): Attempting to send result to 'done' channel.")
 		select {
 		case done <- err: // Send the result (nil or error) back
-		log.Println("connectToWordPress (goroutine): Successfully sent result to 'done' channel.")
+			log.Println("connectToWordPress (goroutine): Successfully sent result to 'done' channel.")
 		default:
 			// Channel closed or blocked, log if necessary
 			log.Println("connectToWordPress (goroutine): 'done' channel blocked or closed before sending.")
@@ -336,14 +378,16 @@ func (v *WordPressSettingsView) connectToWordPress() {
 		err, ok := <-done // Receive the result from the connection goroutine
 		log.Printf("connectToWordPress (UI goroutine): Received from 'done' channel. Error: %v, OK: %t", err, ok)
 
+		// Ensure progress dialog is hidden in all cases
+		defer progress.Hide()
+
 		if !ok {
 			// Channel was closed without sending a value, unusual case
 			log.Println("connectToWordPress (UI goroutine): 'done' channel closed unexpectedly.")
 			// Attempt cleanup just in case
-			log.Println("connectToWordPress (UI goroutine): Hiding progress (unexpected close).")
-			progress.Hide()
-			log.Println("connectToWordPress (UI goroutine): Enabling connect button (unexpected close).")
-			v.connectButton.Enable()
+			log.Println("connectToWordPress (UI goroutine): Unexpected close - updating UI state")
+			v.updateConnectButtonState()
+			v.connectButton.Refresh()
 			log.Println("connectToWordPress (UI goroutine): Setting status to Error (unexpected close).")
 			v.statusLabel.SetText("Status: Error (Connection Aborted)")
 			v.statusLabel.Refresh()
@@ -353,9 +397,9 @@ func (v *WordPressSettingsView) connectToWordPress() {
 
 		// --- All UI updates happen here, after the network call is done ---
 		log.Println("connectToWordPress (UI goroutine): Hiding progress.")
-		progress.Hide()          // Hide progress first
+		progress.Hide() // Hide progress first
 		log.Println("connectToWordPress (UI goroutine): Enabling connect button.")
-		v.connectButton.Enable() // Re-enable button
+		// v.connectButton.Enable() // Let updateConnectButtonState handle enabling
 
 		if err != nil {
 			log.Printf("connectToWordPress (UI goroutine): Connection failed. Error: %v", err)
@@ -375,10 +419,25 @@ func (v *WordPressSettingsView) connectToWordPress() {
 		log.Println("connectToWordPress (UI goroutine): Connection successful.")
 		v.statusLabel.SetText("Status: Connected")
 		v.statusLabel.Refresh()
+		
+		// Update button state and force refresh
+		v.updateConnectButtonState()
+		v.connectButton.Refresh()
+		v.window.Canvas().Refresh(v.connectButton)
+		v.statusLabel.Refresh()
+		
+		// Update button state again to ensure consistency
+		v.updateConnectButtonState()
+		v.connectButton.Refresh()
+		
 		if v.onConnectionChanged != nil {
 			log.Println("connectToWordPress (UI goroutine): Calling onConnectionChanged(true).")
 			v.onConnectionChanged(true)
 		}
+		
+		// Final refresh to ensure all UI updates are visible
+		v.window.Canvas().Refresh(v.connectButton)
+		v.window.Canvas().Refresh(v.statusLabel)
 
 		// Save site if remember is checked
 		if remember {
@@ -412,7 +471,6 @@ func (v *WordPressSettingsView) connectToWordPress() {
 	}() // End of UI update handling goroutine
 	log.Println("connectToWordPress: Exiting main function.")
 } // End of connectToWordPress
-
 
 // refreshSavedSites refreshes the list of saved sites
 func (v *WordPressSettingsView) refreshSavedSites() {
@@ -475,7 +533,14 @@ func (v *WordPressSettingsView) deleteSavedSite() {
 
 // SetOnConnectionChanged sets the callback for when connection status changes
 func (v *WordPressSettingsView) SetOnConnectionChanged(callback func(connected bool)) {
-	v.onConnectionChanged = callback
+	v.onConnectionChanged = func(connected bool) {
+		// Call the original callback first
+		if callback != nil {
+			callback(connected)
+		}
+		// Then update the button state
+		v.updateConnectButtonState()
+	}
 }
 
 // UpdateConnectionStatus updates the connection status label
@@ -485,6 +550,6 @@ func (v *WordPressSettingsView) UpdateConnectionStatus(connected bool) {
 	} else {
 		v.statusLabel.SetText("Status: Disconnected")
 	}
+	v.statusLabel.Refresh()
+	v.updateConnectButtonState() // Update button whenever status is explicitly updated
 }
-
-

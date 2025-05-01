@@ -15,6 +15,7 @@ import (
 	"github.com/teilomillet/gollm/providers"
 	"github.com/teilomillet/gollm/types"
 	"github.com/teilomillet/gollm/utils"
+	
 )
 
 // GeminiProvider implements the provider interface for Google Gemini.
@@ -56,8 +57,8 @@ func NewGeminiProvider(apiKey, model string, extraHeaders map[string]string) pro
 
 	// Set default model if provided one is empty
 	if provider.model == "" {
-		provider.model = "gemini-1.5-pro-latest"
-		log.Printf("Warning: Gemini model not specified, defaulting to %s", provider.model)
+		provider.model = "gemini-2.0-flash"
+		log.Printf("Gemini model defaulting to %s", provider.model)
 	}
 
 	// Copy provided extraHeaders
@@ -69,7 +70,16 @@ func NewGeminiProvider(apiKey, model string, extraHeaders map[string]string) pro
 
 	// Initialize the Gemini client
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	clientOptions := []option.ClientOption{
+		option.WithAPIKey(apiKey),
+		// --- Add Endpoint Override ---
+		// Uncomment the line below to explicitly target the v1beta endpoint
+		//option.WithEndpoint("generativelanguage.googleapis.com:443"), // Base endpoint, library adds path
+		// Or potentially the full path if needed, check genai docs:
+		option.WithEndpoint("https://generativelanguage.googleapis.com/v1beta/"),
+	}
+	client, err := genai.NewClient(ctx, clientOptions...)
+	// Check if the client was created successfully
 	if err != nil {
 		log.Printf("Error creating Gemini client: %v", err)
 		// We'll return the provider anyway and let the actual API calls fail if needed
@@ -231,10 +241,10 @@ func (p *GeminiProvider) SetDefaultOptions(cfg *config.Config) {
 	}
 
 	// Set model: Prioritize provider-specific, then global, then keep existing default
-	if providerModel != "" && (p.model == "" || p.model == "gemini-1.5-pro-latest") {
+	if providerModel != "" && (p.model == "" || p.model == "gemini-2.0-flash") {
 		p.model = providerModel
 		p.logger.Info("Applied provider-specific default model", "model", p.model)
-	} else if cfg.Model != "" && (p.model == "" || p.model == "gemini-1.5-pro-latest") {
+	} else if cfg.Model != "" && (p.model == "" || p.model == "gemini-2.0-flash") {
 		p.model = cfg.Model // Fallback to global default model
 		p.logger.Info("Applied global default model", "model", p.model)
 	}
@@ -345,6 +355,7 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, prompt string) (st
 	p.mutex.Unlock()
 
 	if client == nil {
+		p.logger.Error("GeminiProvider: GenerateContent called but client is nil")
 		return "", fmt.Errorf("gemini client not initialized")
 	}
 
@@ -365,9 +376,21 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, prompt string) (st
 	genModel.SetMaxOutputTokens(int32(p.maxTokens))
 	p.mutex.Unlock()
 
+	// --- Add Debug Logging ---
+	p.logger.Debug("GeminiProvider: Attempting GenerateContent", "model", model, "prompt_length", len(prompt))
+	if len(prompt) > 100 {
+		p.logger.Debug("GeminiProvider: Prompt prefix", "prefix", prompt[:100]+"...")
+	} else {
+		p.logger.Debug("GeminiProvider: Prompt", "prompt", prompt)
+	}
+	// --- End Debug Logging ---
+
+
 	// Generate content
 	resp, err := genModel.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
+		// Log the specific error from the client library
+		p.logger.Error("GeminiProvider: genModel.GenerateContent call failed", "error", err)
 		return "", fmt.Errorf("gemini API call failed: %w", err)
 	}
 
@@ -383,7 +406,8 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, prompt string) (st
 			result += string(textPart)
 		}
 	}
-
+	
+	p.logger.Debug("GeminiProvider: GenerateContent successful")
 	return result, nil
 }
 

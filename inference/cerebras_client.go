@@ -138,6 +138,3 @@ func (c *CerebrasClient) MakeChatCompletionRequest(ctx context.Context, apiKey, 
 	return response.Choices[0].Message.Content, nil
 }
 
-// --- Removed Methods ---
-// Start(), Stop(), GenerateText(), GenerateWithContext(), SetModel(), IsRunning()
-// These are no longer needed as the provider manages lifecycle and passes config per call.

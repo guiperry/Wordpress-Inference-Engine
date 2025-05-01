@@ -25,10 +25,6 @@ import (
 	// Import jsonschema for tool parameters and response format
 	"github.com/invopop/jsonschema"
 )
-
-// --- Local Placeholder Types (Mimicking genai types) ---
-
-// Define local types to satisfy references previously pointing to genai.*
 // These only need the fields/methods actually used by CerebrasProvider.
 
 // Messages is likely a slice of Message pointers or values
@@ -45,13 +41,6 @@ type Validatable interface {
 type ChatResult struct {
 	Messages []*Message
 	// Add other fields if CerebrasProvider uses them from ToResult()
-}
-
-
-// Model mimics genai.Model interface or struct minimally.
-type Model interface {
-	GetID() string
-	// Add Context() int64 if needed
 }
 
 // MessageFragment mimics genai.MessageFragment for streaming.
@@ -745,13 +734,13 @@ func (p *CerebrasProvider) SetDefaultOptions(cfg *config.Config) {
 	if providerMaxTokens > 0 && (p.maxTokens == 0 || p.maxTokens == 1000) {
 		p.maxTokens = providerMaxTokens
 	}
-	if providerTemp != nil && p.temperature == nil {
+	if p.temperature == nil {
 		p.temperature = providerTemp
 	}
-	if providerTopP != nil && p.topP == nil {
+	if p.topP == nil {
 		p.topP = providerTopP
 	}
-	if providerSeed != nil && p.seed == nil {
+	if p.seed == nil {
 		p.seed = providerSeed
 	}
 
@@ -911,53 +900,5 @@ func (p *CerebrasProvider) ParseStreamResponse(chunk []byte) (string, error) {
 // --- Compile-time Interface Check ---
 var _ providers.Provider = (*CerebrasProvider)(nil)
 
-// --- Helper functions ---
-func getString(m map[string]interface{}, key string) string {
-	if val, ok := m[key]; ok {
-		if s, ok := val.(string); ok {
-			return s
-		}
-	}
-	return ""
-}
 
-func getInt(m map[string]interface{}, key string) int {
-	if val, ok := m[key]; ok {
-		switch v := val.(type) {
-		case int:
-			return v
-		case float64:
-			return int(v)
-		}
-	}
-	return 0
-}
 
-func getFloatPtr(m map[string]interface{}, key string) *float64 {
-	if val, ok := m[key]; ok {
-		if f, ok := val.(float64); ok {
-			return &f
-		}
-		if i, ok := val.(int); ok {
-			f := float64(i)
-			return &f
-		}
-	}
-	return nil
-}
-
-func getInt64Ptr(m map[string]interface{}, key string) *int64 {
-	if val, ok := m[key]; ok {
-		switch v := val.(type) {
-		case int:
-			i64 := int64(v)
-			return &i64
-		case int64:
-			return &v
-		case float64:
-			i64 := int64(v)
-			return &i64
-		}
-	}
-	return nil
-}
