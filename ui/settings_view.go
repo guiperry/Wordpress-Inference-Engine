@@ -13,6 +13,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -162,7 +163,15 @@ type InferenceSettingsView struct {
 
 	// UI elements
 	cerebrasKeyEntry *widget.Entry
-	modelEntry       *widget.Entry
+	geminiKeyEntry   *widget.Entry // Added for Gemini key
+	deepseekKeyEntry *widget.Entry // ADDED: Deepseek key
+	// Removed modelEntry, replaced with display labels
+	primaryModelsLabel   *widget.Label
+	fallbackModelsLabel *widget.Label
+
+	// --- ADDED: MOA Default Model Settings ---
+	moaPrimaryModelSelect   *widget.Select // Changed from Entry to Select
+	moaFallbackModelSelect *widget.Select // Changed from Entry to Select
 }
 
 // NewInferenceSettingsView creates a new inference settings view
@@ -178,15 +187,12 @@ func NewInferenceSettingsView(inferenceService *inference.InferenceService, wind
 // Initializes the inference settings view
 func (v *InferenceSettingsView) initialize() {
 	// --- Remove Provider Selection ---
-	// v.providerSelect = widget.NewSelect(...) // Remove this
 
 	// API Key Inputs
-	// Keep Cerebras Key Input
 	v.cerebrasKeyEntry = widget.NewPasswordEntry()
-	v.cerebrasKeyEntry.SetPlaceHolder("Cerebras API Key (Proxy - loaded from env)")
+	v.cerebrasKeyEntry.SetPlaceHolder("Cerebras API Key (loaded from CEREBRAS_API_KEY)")
 	if key := os.Getenv("CEREBRAS_API_KEY"); key != "" {
 		v.cerebrasKeyEntry.SetText(key)
-		v.cerebrasKeyEntry.Disable()
 	}
 	saveCerebrasButton := widget.NewButton("Set Cerebras Key Env Var", func() {
 		key := v.cerebrasKeyEntry.Text
@@ -194,75 +200,149 @@ func (v *InferenceSettingsView) initialize() {
 			os.Setenv("CEREBRAS_API_KEY", key)
 			dialog.ShowInformation("Restart Required", "Cerebras API key environment variable set.\nPlease restart the application.", v.window)
 			v.cerebrasKeyEntry.Disable()
+		} else {
+			dialog.ShowInformation("Input Required", "Please enter the Cerebras API Key.", v.window)
 		}
 	})
 	v.cerebrasKeyEntry.OnChanged = func(_ string) {
-		if v.cerebrasKeyEntry.Disabled() {
-			v.cerebrasKeyEntry.Enable()
-		}
+		saveCerebrasButton.Enable() // Enable save button on change
 	}
 
 	// --- Add Gemini Key Input ---
-	geminiKeyEntry := widget.NewPasswordEntry() // Create new entry
-	geminiKeyEntry.SetPlaceHolder("Gemini API Key (Base - loaded from env)")
+	v.geminiKeyEntry = widget.NewPasswordEntry() // Use v.geminiKeyEntry
+	v.geminiKeyEntry.SetPlaceHolder("Gemini API Key (loaded from GEMINI_API_KEY)")
 	if key := os.Getenv("GEMINI_API_KEY"); key != "" {
-		geminiKeyEntry.SetText(key)
-		geminiKeyEntry.Disable()
+		v.geminiKeyEntry.SetText(key)
 	}
 	saveGeminiButton := widget.NewButton("Set Gemini Key Env Var", func() {
-		key := geminiKeyEntry.Text
+		key := v.geminiKeyEntry.Text
 		if key != "" {
 			os.Setenv("GEMINI_API_KEY", key)
 			dialog.ShowInformation("Restart Required", "Gemini API key environment variable set.\nPlease restart the application.", v.window)
-			geminiKeyEntry.Disable()
+			v.geminiKeyEntry.Disable()
+		} else {
+			dialog.ShowInformation("Input Required", "Please enter the Gemini API Key.", v.window)
 		}
 	})
-	geminiKeyEntry.OnChanged = func(_ string) {
-		if geminiKeyEntry.Disabled() {
-			geminiKeyEntry.Enable()
-		}
+	v.geminiKeyEntry.OnChanged = func(_ string) {
+		saveGeminiButton.Enable() // Enable save button on change
 	}
 
-	// Model Selection (Let's configure the Proxy/Cerebras model here)
-	v.modelEntry = widget.NewEntry()
-	v.modelEntry.SetPlaceHolder("Enter Proxy model (e.g., llama-4-scout-17b-16e-instruct)")
-	v.modelEntry.SetText(v.inferenceService.GetProxyModel()) // Get proxy model
+	// --- ADDED: Deepseek Key Input ---
+	v.deepseekKeyEntry = widget.NewPasswordEntry()
+	v.deepseekKeyEntry.SetPlaceHolder("Deepseek API Key (loaded from DEEPSEEK_API_KEY)")
+	if key := os.Getenv("DEEPSEEK_API_KEY"); key != "" {
+		v.deepseekKeyEntry.SetText(key)
+	}
+	saveDeepseekButton := widget.NewButton("Set Deepseek Key Env Var", func() {
+		key := v.deepseekKeyEntry.Text
+		if key != "" {
+			os.Setenv("DEEPSEEK_API_KEY", key)
+			dialog.ShowInformation("Restart Required", "Deepseek API key environment variable set.\nPlease restart the application.", v.window)
+			v.deepseekKeyEntry.Disable()
+		} else {
+			dialog.ShowInformation("Input Required", "Please enter the Deepseek API Key.", v.window)
+		}
+	})
+	v.deepseekKeyEntry.OnChanged = func(_ string) {
+		saveDeepseekButton.Enable() // Enable save button on change
+	}
+	// --- End ADDED ---
+	// --- Display Configured Models ---
+	v.primaryModelsLabel = widget.NewLabel("Primary Models: Loading...")
+	v.fallbackModelsLabel = widget.NewLabel("Fallback Models: Loading...")
 
-	setModelButton := widget.NewButton("Set Proxy Model", func() { // Update button text
-		model := v.modelEntry.Text
-		if model == "" { /* show info */
+	// Refresh button to update displayed models (in case service restarts or config changes)
+	refreshModelsButton := widget.NewButtonWithIcon("Refresh Models", theme.ViewRefreshIcon(), func() {
+		v.refreshDisplayedModels()
+	})
+
+	// --- ADDED: MOA Default Model Settings ---
+	moaSettingsLabel := widget.NewLabel("MOA Default Models (Affects Mixture-of-Agents):")
+
+	// Create Select widgets, initially empty, will be populated by refreshDisplayedModels
+	v.moaPrimaryModelSelect = widget.NewSelect([]string{}, func(selected string) {
+		// Optional: Handle selection change directly if needed, otherwise button press is fine
+		log.Printf("UI: MOA Primary dropdown selected: %s", selected)
+	})
+
+	setMOAPrimaryButton := widget.NewButton("Set MOA Primary", func() {
+		model := v.moaPrimaryModelSelect.Selected // Get value from Select
+		if model == "" {
+			dialog.ShowInformation("Input Required", "Please enter a model name.", v.window)
 			return
 		}
-		// Use SetProxyModel
-		err := v.inferenceService.SetProxyModel(model)
+		err := v.inferenceService.SetMOAPrimaryModel(model)
 		if err != nil {
-			dialog.ShowError(err, v.window)
+			dialog.ShowError(fmt.Errorf("Failed to set MOA primary model: %w", err), v.window)
 		} else {
-			dialog.ShowInformation("Success", fmt.Sprintf("Proxy (Cerebras) model set to '%s'", model), v.window)
+			dialog.ShowInformation("Success", fmt.Sprintf("MOA primary default set to '%s'. MOA reconfigured.", model), v.window)
 		}
 	})
 
-	// Optional: Add entry and button for setting Base (Gemini) model if desired
-	// baseModelEntry := widget.NewEntry() ...
-	// setBaseModelButton := widget.NewButton("Set Base Model", ...) ...
+	v.moaFallbackModelSelect = widget.NewSelect([]string{}, func(selected string) {
+		// Optional: Handle selection change directly if needed
+		log.Printf("UI: MOA Fallback dropdown selected: %s", selected)
+	})
 
+	setMOAFallbackButton := widget.NewButton("Set MOA Fallback", func() {
+		// Similar logic to setMOAPrimaryButton, calling SetMOAFallbackModel
+		model := v.moaFallbackModelSelect.Selected // Get value from Select
+		// ... (validation) ...
+		err := v.inferenceService.SetMOAFallbackModel(model)
+		// ... (handle error/success dialog) ...
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("Failed to set MOA fallback model: %w", err), v.window)
+		} else {
+			dialog.ShowInformation("Success", fmt.Sprintf("MOA fallback/aggregator default set to '%s'. MOA reconfigured.", model), v.window)
+		}
+	})
+	// --- End ADDED ---
 	// Create layout
 	v.container = container.NewVBox(
 		widget.NewLabel("Inference Settings"),
-		// widget.NewLabel("Model Provider:"), // Remove provider label
-		// v.providerSelect, // Remove select widget
-		widget.NewLabel("Proxy Model (Cerebras):"), // Update label
-		v.modelEntry,
-		setModelButton,
-		// Optional: Add Base Model widgets here
+		widget.NewSeparator(),
+		widget.NewLabel("Configured Models (Read-Only):"),
+		v.primaryModelsLabel,
+		v.fallbackModelsLabel,
+		refreshModelsButton,
 		widget.NewSeparator(),
 		widget.NewLabel("API Keys (Set Environment Variable & Restart):"),
 		v.cerebrasKeyEntry,
 		saveCerebrasButton,
-		geminiKeyEntry,   // Add Gemini key entry
+		v.geminiKeyEntry, // Add Gemini key entry
 		saveGeminiButton, // Add Gemini save button
-		// Remove OpenAI widgets
+		v.deepseekKeyEntry, // ADDED: Deepseek key entry
+		saveDeepseekButton, // ADDED: Deepseek save button
+		widget.NewSeparator(),
+		moaSettingsLabel,
+		v.moaPrimaryModelSelect, // Use Select widget
+		setMOAPrimaryButton,
+		v.moaFallbackModelSelect, // Use Select widget
+		setMOAFallbackButton,
 	)
+
+	// Initial refresh of displayed models
+	v.refreshDisplayedModels()
+}
+
+// refreshDisplayedModels updates the labels showing the configured models.
+func (v *InferenceSettingsView) refreshDisplayedModels() {
+	primaryModels := v.inferenceService.GetPrimaryModels()
+	currentPrimary := v.inferenceService.GetProxyModel() // Get current MOA primary
+
+	fallbackModels := v.inferenceService.GetFallbackModels()
+	currentFallback := v.inferenceService.GetBaseModel() // Get current MOA fallback
+
+	v.primaryModelsLabel.SetText(fmt.Sprintf("Primary Models: %v", primaryModels))
+	v.fallbackModelsLabel.SetText(fmt.Sprintf("Fallback Models: %v", fallbackModels))
+
+	// Update options and selected value for MOA dropdowns
+	v.moaPrimaryModelSelect.Options = primaryModels
+	v.moaPrimaryModelSelect.SetSelected(currentPrimary) // Set current selection
+
+	v.moaFallbackModelSelect.Options = fallbackModels
+	v.moaFallbackModelSelect.SetSelected(currentFallback) // Set current selection
 }
 
 // Container returns the container for the Inference Settings view

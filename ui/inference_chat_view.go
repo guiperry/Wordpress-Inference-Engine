@@ -18,6 +18,7 @@ type InferenceChatView struct { // <-- Renamed struct
 	container        fyne.CanvasObject
 	inferenceService *inference.InferenceService
 	window           fyne.Window
+	
 
 	promptInput    *widget.Entry
 	responseOutput *widget.Entry
