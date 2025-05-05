@@ -228,40 +228,33 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, messa
 			lastError = err // Store the error
 
 			// Decide if we should continue to the next attempt in *this* list
-			if !d.shouldFallbackOnError(err) {
-				log.Printf("DelegatorService (%s): Error is not retryable. Failing operation.", operationName)
-				return "", fmt.Errorf("%s failed with non-retryable error on %s: %w", operationName, targetName, err)
-			}
-
-			// --- SPECIAL CONTEXT MANAGER FALLBACK FOR PRIMARY TOKEN ERRORS ---
-			// Check if this was a primary attempt, a context error, and if we have a context manager + designated chunking LLM
-			isPrimaryAttempt := (listNum == 0 && !startedWithFallback)
+			// --- ADDED: Reactive Chunking on Context Error ---
 			errStr := err.Error()
 			isContextError := strings.Contains(errStr, "context_length_exceeded") || strings.Contains(errStr, "token limit")
 
-			if isPrimaryAttempt && isContextError && d.contextManager != nil && attempt.Config.ProviderName == "cerebras" { // Check specifically for Cerebras here
-				log.Printf("DelegatorService (%s): Primary Cerebras attempt failed with context limit. Attempting immediate chunking fallback with ContextManager using Cerebras itself...", operationName)
+			if isContextError && d.contextManager != nil {
+				log.Printf("DelegatorService (%s): Attempt with %s failed with context limit. Attempting REACTIVE chunking with ContextManager using the same LLM...", operationName, targetName)
 
-				// Use the current Cerebras instance for chunking
+				// Use the current LLM instance that just failed for chunking
 				chunkingLLM := attempt.Instance
-
 				if chunkingLLM != nil {
 					// Reconstruct the full prompt string from the original messages
 					fullPromptForChunking := formatMessagesToPrompt(messages) // Use the original full messages
 					chunkInstruction := "Process the following section of text:" // Adjust as needed
 
-					// Call the context manager with wrapped LLM
+					// Call the context manager
 					wrappedLLM := &LLMAdapter{LLM: chunkingLLM}
 					chunkedResponse, chunkErr := d.contextManager.ProcessLargePrompt(ctx, wrappedLLM, fullPromptForChunking, chunkInstruction)
 					if chunkErr == nil {
-						log.Printf("DelegatorService (%s): ContextManager chunking fallback successful.", operationName)
+						log.Printf("DelegatorService (%s): REACTIVE ContextManager chunking successful with %s.", operationName, targetName)
 						d.memory.AddMessage(gollm_types.MemoryMessage{Role: "assistant", Content: chunkedResponse})
 						return chunkedResponse, nil // Return successful chunked response
 					}
-					log.Printf("DelegatorService (%s): ContextManager chunking fallback with Cerebras failed: %v. Proceeding to standard fallback list (Deepseek, Gemini...).", operationName, chunkErr)
-					// If chunking fails, we'll let the loop proceed to the main fallback list below.
+					log.Printf("DelegatorService (%s): REACTIVE ContextManager chunking with %s failed: %v. Proceeding to next attempt.", operationName, targetName, chunkErr)
+					// If chunking fails, store its error (or keep the original context error?) and let the loop proceed.
+					// lastError = chunkErr // Optionally update lastError to the chunking error
 				}
-			} // --- END SPECIAL CONTEXT MANAGER FALLBACK ---
+			} // --- END REACTIVE Chunking Check ---
 
 			log.Printf("DelegatorService (%s): Error is retryable. Continuing to next attempt...", operationName)
 		}

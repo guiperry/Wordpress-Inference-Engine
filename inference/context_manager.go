@@ -35,11 +35,12 @@ const (
 // ContextManager handles chunking and processing of large text inputs.
 type ContextManager struct {
 	// inferenceService TextGenerator // REMOVED: LLM will be passed to ProcessLargePrompt
-	strategy         ChunkingStrategy // How to split the text
-	processingMode   ProcessingMode   // How to process chunks
-	maxChunkSize     int              // Maximum tokens per chunk (for ChunkByTokenCount)
-	chunkOverlap     int              // Number of tokens to overlap between chunks
-	modelName        string           // Model name for token estimation
+	strategy           ChunkingStrategy // How to split the text
+	processingMode     ProcessingMode   // How to process chunks
+	maxChunkSize       int              // Maximum tokens per chunk (for ChunkByTokenCount)
+	chunkOverlap       int              // Number of tokens to overlap between chunks
+	modelName          string           // Model name for token estimation
+	contextTokenBudget int              // Max tokens for summary context in sequential mode
 }
 
 // ContextManagerOption defines a functional option for configuring ContextManager.
@@ -73,6 +74,13 @@ func WithModelName(modelName string) ContextManagerOption {
 	}
 }
 
+// WithContextTokenBudget sets the maximum tokens for the summary context in sequential mode.
+func WithContextTokenBudget(budget int) ContextManagerOption {
+	return func(cm *ContextManager) {
+		cm.contextTokenBudget = budget
+	}
+}
+
 // TextGenerator defines the minimal interface needed for generating text
 // This allows passing different LLM instances (like those from gollm).
 type TextGenerator interface {
@@ -86,11 +94,12 @@ func NewContextManager(strategy ChunkingStrategy, opts ...ContextManagerOption) 
 	// Create with default values
 	cm := &ContextManager{
 		// inferenceService: service, // REMOVED
-		strategy:         strategy,
-		processingMode:   ParallelProcessing, // Default to parallel
-		maxChunkSize:     1000,               // Default max chunk size
-		chunkOverlap:     100,                // Default overlap
-		modelName:        "gpt-4",            // Default model for token estimation
+		strategy:           strategy,
+		processingMode:     ParallelProcessing, // Default to parallel
+		maxChunkSize:       1000,               // Default max chunk size
+		chunkOverlap:       100,                // Default overlap
+		modelName:          "gpt-4",            // Default model for token estimation
+		contextTokenBudget: 250,                // Default token budget for context summary
 	}
 
 	// Apply options
@@ -238,7 +247,6 @@ func (cm *ContextManager) splitByTokenCount(text string) []string {
 					}
 				}
 
-
 				sentenceTokens := estimateTokens(sentenceTrimmed, cm.modelName)
 
 				// If adding this sentence would exceed the max chunk size, start a new chunk
@@ -361,103 +369,132 @@ func (cm *ContextManager) processInParallel(ctx context.Context, llm TextGenerat
 
 // processSequentially processes chunks in sequence, passing context between them.
 // Accepts the TextGenerator (LLM instance).
+
+// processSequentially processes chunks in sequence, passing context between them.
+// Accepts the TextGenerator (LLM instance).
 func (cm *ContextManager) processSequentially(ctx context.Context, llm TextGenerator, chunks []string, instructionPerChunk string) (string, error) {
+	// Instead of using pre-split chunks, we'll manage the text dynamically.
+	// Join the pre-split chunks back together for this approach.
+	// A better long-term solution might be to pass the raw text here.
+	remainingText := strings.Join(chunks, "\n\n") // Reconstruct (or pass original text)
+
 	var results []string
 	var previousOutputSummary string // Store summary of previous output
 
-	for i, chunk := range chunks {
-		log.Printf("ContextManager: Processing chunk %d/%d sequentially...", i+1, len(chunks))
+	chunkIndex := 0
 
+	// Estimate tokens for the base instruction
+	instructionTokens := estimateTokens(instructionPerChunk, cm.modelName)
+
+	for remainingText != "" {
+		chunkIndex++
 		// Construct prompt for this chunk, including original instruction and summary context
 		var chunkPrompt string
-		if i == 0 {
+		var currentChunk string
+
+		// Calculate tokens used by instruction and summary
+		summaryTokens := estimateTokens(previousOutputSummary, cm.modelName)
+		contextTokens := instructionTokens + summaryTokens
+
+		// Calculate remaining budget for the *content* of the next chunk
+		// We need the LLM's actual context limit. Using maxChunkSize as a proxy for now,
+		// but this should ideally be the model's actual limit.
+		// A small buffer (e.g., 50 tokens) is added for safety/formatting.
+		contentBudget := cm.maxChunkSize - contextTokens - 50
+		if contentBudget <= 0 {
+			log.Printf("ContextManager: Warning - No token budget left for chunk %d content after context/instruction. Context Tokens: %d", chunkIndex, contextTokens)
+			// Handle this case - maybe skip chunk, return error, or try with minimal content?
+			// For now, let's try to take a very small chunk.
+			contentBudget = 50 // Arbitrary small budget
+		}
+
+		// Simple chunking implementation - split at nearest whitespace within budget
+		chunkEnd := min(contentBudget, len(remainingText))
+		currentChunk = remainingText[:chunkEnd]
+		remainingText = remainingText[chunkEnd:]
+
+		if currentChunk == "" && remainingText != "" {
+			log.Printf("ContextManager: Warning - Could not extract next chunk within budget for chunk %d.", chunkIndex)
+			results = append(results, fmt.Sprintf("[ERROR SKIPPING REST OF TEXT - CHUNK %d TOO SMALL FOR BUDGET]", chunkIndex))
+			break
+		}
+
+		log.Printf("ContextManager: Processing chunk %d sequentially (Content Budget: %d tokens)...", chunkIndex, contentBudget)
+
+		if chunkIndex == 0 {
 			// First chunk - no previous context
-			chunkPrompt = fmt.Sprintf("Overall Task: %s\n\nCurrent Section:\n---\n%s\n---",
-				instructionPerChunk,
-				chunk)
-		} else {
-			// Include original task and summary of previous output
-			chunkPrompt = fmt.Sprintf("Overall Task: %s\n\nSummary of previous output:\n%s\n\nCurrent Section:\n---\n%s\n---",
-				instructionPerChunk,
-				previousOutputSummary,
-				chunk)
+			// Initialize any first-chunk specific variables here
 		}
 
 		// --- Add logging for the prompt being sent ---
-		log.Printf("ContextManager: Sequential Prompt for Chunk %d:\n%s\n", i+1, chunkPrompt)
+
+		log.Printf("ContextManager: Sequential Prompt for Chunk %d:\n%s\n", chunkIndex, chunkPrompt)
 		// --- End logging ---
 
 		result, err := llm.GenerateText(chunkPrompt) // Use the passed LLM
 		if err != nil {
 			// If an error occurs, return the results obtained so far and the error
-			log.Printf("ContextManager: Error on chunk %d: %v", i+1, err)
-			results = append(results, fmt.Sprintf("[ERROR PROCESSING CHUNK %d]", i+1))
+
+			log.Printf("ContextManager: Error on chunk %d: %v", chunkIndex, err)
+			results = append(results, fmt.Sprintf("[ERROR PROCESSING CHUNK %d]", chunkIndex))
 			return strings.Join(results, "\n\n---\n\n"),
-				fmt.Errorf("error processing chunk %d: %w", i+1, err)
+
+				fmt.Errorf("error processing chunk %d: %w", chunkIndex, err)
 		}
 
 		results = append(results, result)
 
-		// Update previous output summary for context in next chunk
-		// Simple approach: take the last N sentences or tokens
-		previousOutputSummary = cm.summarizeForContext(result)
-		if previousOutputSummary != "" {
-			log.Printf("ContextManager: Generated summary for next chunk context: %s", previousOutputSummary)
-		}
-
-		log.Printf("ContextManager: Chunk %d processed.", i+1)
+		log.Printf("ContextManager: Generated summary for next chunk context: %s", previousOutputSummary)
 	}
 
-	// Reassemble results in order
-	finalResult := strings.Join(results, "\n\n---\n\n")
-
-	log.Println("ContextManager: Finished processing all chunks sequentially.")
-	return finalResult, nil
+	log.Printf("ContextManager: Chunk %d processed.", chunkIndex)
+	return strings.Join(results, "\n\n---\n\n"), nil
 }
 
+// Reassemble results in order
+
 // summarizeForContext creates a short summary of the text for context passing.
-func (cm *ContextManager) summarizeForContext(text string) string {
-	// Simple approach: Take the last few sentences.
-	// A more robust approach might involve actual summarization or token counting.
+// It aims to stay within the provided token budget.
+func (cm *ContextManager) summarizeForContext(text string, budget int) string {
+	if budget <= 0 {
+		return "" // No budget, no summary
+	}
+
+	// Split into sentences (or potentially words/tokens for finer control)
 	sentenceRegex := regexp.MustCompile(`[.!?]\s+`)
 	sentences := sentenceRegex.Split(text, -1)
 	numSentences := len(sentences)
-	contextSentences := 3 // Number of sentences to keep for context
 
-	if numSentences <= contextSentences {
-		return text // Return the whole text if it's short
-	}
+	var summarySentences []string // Store sentences in reverse order
+	currentTokens := 0
 
-	// Get the last 'contextSentences' sentences
-	startIndex := numSentences - contextSentences
-	// Join with ". " - this assumes sentences were split correctly and lost punctuation
-	summary := strings.Join(sentences[startIndex:], ". ")
-	// Try to add back the final punctuation if it was likely removed
-	lastCharOriginal := text[len(text)-1]
-	if lastCharOriginal == '.' || lastCharOriginal == '!' || lastCharOriginal == '?' {
-		// Check if summary already ends with punctuation (unlikely with Split)
-		if len(summary) > 0 {
-			lastCharSummary := summary[len(summary)-1]
-			if !(lastCharSummary == '.' || lastCharSummary == '!' || lastCharSummary == '?') {
-				summary += string(lastCharOriginal)
-			}
+	// Iterate backwards through sentences
+	for i := numSentences - 1; i >= 0; i-- {
+		sentence := strings.TrimSpace(sentences[i])
+		if sentence == "" {
+			continue
 		}
-	} else {
-		// If original didn't end with punctuation, ensure summary doesn't either (unless it naturally does)
-		if len(summary) > 0 {
-			lastCharSummary := summary[len(summary)-1]
-			if lastCharSummary == '.' || lastCharSummary == '!' || lastCharSummary == '?' {
-				// It might have ended with punctuation naturally, leave it.
-			} else {
-				// Add a period if no punctuation exists.
-				summary += "."
-			}
+		// Estimate tokens for the sentence (add 1 for potential space)
+		sentenceTokens := estimateTokens(sentence, cm.modelName) + 1
+
+		if currentTokens+sentenceTokens <= budget {
+			summarySentences = append(summarySentences, sentence) // Add sentence to the beginning of our list (effectively reversing)
+			currentTokens += sentenceTokens
 		}
 	}
 
-	return summary
+	// The summarySentences slice was built by appending sentences from the end backwards.
+	// We need to reverse this slice to get the correct chronological order.
+	for i, j := 0, len(summarySentences)-1; i < j; i, j = i+1, j-1 {
+		summarySentences[i], summarySentences[j] = summarySentences[j], summarySentences[i]
+	}
+
+	// Join the sentences with spaces (they're already in correct order)
+	if len(summarySentences) == 0 {
+		return ""
+	}
+	return strings.Join(summarySentences, " ")
 }
-
 
 // ProcessLargePromptWithStrategy processes a large prompt with a specific chunking strategy,
 // overriding the default strategy for this call only.

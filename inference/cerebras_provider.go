@@ -904,9 +904,6 @@ func (p *CerebrasProvider) ParseStreamResponse(chunk []byte) (string, error) {
 // --- Compile-time Interface Check ---
 var _ providers.Provider = (*CerebrasProvider)(nil)
 
-
-
-
 const (
 	CerebrasAPIURL = "https://api.cerebras.ai/v1/chat/completions"
 )
@@ -924,9 +921,6 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-
-
-
 // NewCerebrasClient creates a new instance of CerebrasClient
 func NewCerebrasClient() *CerebrasClient {
 	// Only initialize the http client
@@ -934,6 +928,7 @@ func NewCerebrasClient() *CerebrasClient {
 		client: &http.Client{},
 	}
 }
+
 // convertToCerebrasMessages converts a slice of Message to CerebrasMessage
 func convertToCerebrasMessages(messages []Message) []CerebrasMessage {
 	cerebrasMessages := make([]CerebrasMessage, len(messages))
@@ -1030,4 +1025,3 @@ func (c *CerebrasClient) MakeChatCompletionRequest(ctx context.Context, apiKey, 
 	// Return the content of the first choice
 	return response.Choices[0].Message.Content, nil
 }
-
