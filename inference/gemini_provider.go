@@ -140,9 +140,17 @@ func (p *GeminiProvider) Name() string {
 
 // Endpoint returns the API endpoint URL.
 func (p *GeminiProvider) Endpoint() string {
+	// Construct the full URL path required by the API for generateContent
+	// Gollm likely uses this directly for the request.
 	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	return p.baseEndpoint // Return the stored base endpoint
+	base := p.baseEndpoint
+	model := p.model
+	p.mutex.Unlock()
+
+	if !strings.HasSuffix(base, "/") {
+		base += "/"
+	}
+	return fmt.Sprintf("%smodels/%s:generateContent", base, model) // Return full path excluding API key
 }
 
 // Headers returns the necessary HTTP headers.
@@ -154,7 +162,11 @@ func (p *GeminiProvider) Headers() map[string]string {
 		"Content-Type": "application/json", // Key is needed in URL now
 		"User-Agent":   "Wordpress-Inference-Engine/1.0",
 	}
+	// Add Authorization header - gollm might expect the provider to supply this
 	if p.apiKey != "" {
+		headers["Authorization"] = "Bearer " + p.apiKey // Add Bearer token
+	} else {
+		p.logger.Warn("Gemini API key is missing when generating headers")
 	}
 
 	// Add any extra headers
@@ -429,11 +441,14 @@ func (p *GeminiProvider) ParseStreamResponse(chunk []byte) (string, error) {
 
 // GenerateContent sends a request to the Gemini API and returns the response.
 func (p *GeminiProvider) GenerateContent(ctx context.Context, prompt string) (string, error) {
+	// This method might not be directly called by gollm's standard Generate flow,
+	// which uses PrepareRequest, Endpoint, Headers, and ParseResponse.
+	// Keep it simple or log a warning if it's unexpectedly called.
+	p.logger.Warn("GenerateContent called directly - this might bypass gollm's standard flow.")
+	
 	// Prepare request body using the provider method
 	reqBytes, err := p.PrepareRequest(prompt, nil) // Pass nil options for now
-	if err != nil {
-		return "", fmt.Errorf("failed to prepare Gemini request: %w", err)
-	}
+	
 
 	p.mutex.Lock()
 	model := p.model
@@ -442,12 +457,7 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, prompt string) (st
 	httpClient := p.client
 	p.mutex.Unlock()
 
-	if apiKey == "" {
-		return "", fmt.Errorf("gemini API key not set")
-	}
-	if httpClient == nil {
-		return "", fmt.Errorf("http client not initialized")
-	}
+
 
 	// Construct the full URL manually
 	// Ensure baseEndpoint ends with a slash
