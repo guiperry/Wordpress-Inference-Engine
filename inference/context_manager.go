@@ -8,8 +8,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-
-	"github.com/teilomillet/gollm/llm"
 )
 
 // ChunkingStrategy defines how to split the text.
@@ -79,21 +77,7 @@ func WithModelName(modelName string) ContextManagerOption {
 // This allows passing different LLM instances (like those from gollm).
 type TextGenerator interface {
 	GenerateText(prompt string) (string, error)
-}
-
-// LLMAdapter adapts gollm's llm.LLM to the TextGenerator interface
-type LLMAdapter struct {
-	LLM llm.LLM
-}
-
-func (a *LLMAdapter) GenerateText(prompt string) (string, error) {
-	ctx := context.Background()
-	p := &llm.Prompt{} // Initialize empty prompt
-	// Try to set prompt text using reflection if needed
-	if p, ok := interface{}(p).(interface{ SetText(string) }); ok {
-		p.SetText(prompt)
-	}
-	return a.LLM.Generate(ctx, p)
+	// Add other methods if needed by the context manager, e.g., Generate(ctx, prompt)
 }
 
 // NewContextManager creates a new ContextManager with the given options.

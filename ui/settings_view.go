@@ -371,18 +371,35 @@ func (v *WordPressSettingsView) updateConnectButtonState() {
 	if v.wpService.IsConnected() {
 		v.connectButton.SetText("Disconnect")
 		v.connectButton.OnTapped = func() {
-			log.Println("Disconnect button tapped.")
-			// Call the disconnect method on the service
-			v.wpService.Disconnect()
-			// Update UI elements after disconnect
-			v.statusLabel.SetText("Status: Disconnected")
-			v.statusLabel.Refresh()
-			v.updateConnectButtonState() // Update the button itself
-			// Notify other parts of the app if needed
-			if v.onConnectionChanged != nil {
-				v.onConnectionChanged(false)
-			}
-			log.Println("Disconnect sequence complete.")
+			log.Println("Disconnect button tapped. Starting disconnect goroutine.")
+			// Disable button immediately to prevent double clicks
+			v.connectButton.Disable()
+			v.connectButton.SetText("Disconnecting...")
+			v.connectButton.Refresh()
+
+			// Perform disconnect in a goroutine
+			go func() {
+				log.Println("Disconnect goroutine: Calling v.wpService.Disconnect()...") // <-- Add log BEFORE call
+				v.wpService.Disconnect()
+				log.Println("Disconnect goroutine: v.wpService.Disconnect() returned.") // <-- Add log AFTER call
+				
+				// --- Directly Update UI Elements After Disconnect ---
+				log.Println("Disconnect UI update: Setting status and button directly.")
+				v.statusLabel.SetText("Status: Disconnected")
+				v.statusLabel.Refresh()
+
+				v.connectButton.SetText("Connect")
+				v.connectButton.OnTapped = v.connectToWordPress // Reset action to connect
+				v.connectButton.Enable()                       // Ensure button is enabled
+				v.connectButton.Refresh()                      // Refresh the button's appearance
+
+				// Notify other parts of the application *after* this view's UI is updated
+				if v.onConnectionChanged != nil {
+						v.onConnectionChanged(false)
+					}
+					log.Println("Disconnect UI update: Complete.")
+			
+			}()
 		}
 	} else {
 		v.connectButton.SetText("Connect")

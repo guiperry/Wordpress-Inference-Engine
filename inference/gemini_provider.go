@@ -2,20 +2,27 @@
 package inference
 
 import (
+	"bytes" // Import bytes package
 	"context"
+	"encoding/json" // Import json package
 	"fmt"
+	"io"
 	"log"
+	"net/http" // Import net/http package
+	"strings"
 	"sync"
 
 	// Import Google's Gemini client library
-	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
+	// "github.com/google/generative-ai-go/genai" // REMOVE genai client import
+	// "google.golang.org/api/option" // REMOVE unused import
 
+	"os" // Import os package
+
+	"github.com/google/generative-ai-go/genai"
 	"github.com/teilomillet/gollm/config"
 	"github.com/teilomillet/gollm/providers"
 	"github.com/teilomillet/gollm/types"
 	"github.com/teilomillet/gollm/utils"
-	
 )
 
 // GeminiProvider implements the provider interface for Google Gemini.
@@ -26,12 +33,29 @@ type GeminiProvider struct {
 	temperature  *float32
 	topP         *float32
 	topK         *int32
-	geminiClient *genai.Client
+	// geminiClient *genai.Client // REMOVE genai client
+	client       *http.Client // ADD standard http client
+	baseEndpoint string       // ADD base endpoint storage
 	extraHeaders map[string]string
 	logger       utils.Logger
 	mutex        sync.Mutex
-	
-	
+}
+
+// --- Gemini API Request/Response Structs (Manual HTTP) ---
+type GeminiRequest struct {
+	Contents         []GeminiContent        `json:"contents"`
+	GenerationConfig *GeminiGenerationConfig `json:"generationConfig,omitempty"`
+	// SafetySettings, Tools, etc. can be added here if needed
+}
+
+type GeminiContent struct {
+	Role  string       `json:"role,omitempty"` // "user" or "model"
+	Parts []GeminiPart `json:"parts"`
+}
+
+type GeminiPart struct {
+	Text string `json:"text"`
+	// InlineData, FunctionCall, etc. can be added here
 }
 
 // init registers the Gemini provider with the gollm registry.
@@ -39,6 +63,29 @@ type GeminiProvider struct {
 func init() {
 	log.Println("Registering Gemini provider constructor with gollm registry")
 	providers.GetDefaultRegistry().Register("gemini", NewGeminiProvider)
+}
+
+type GeminiGenerationConfig struct {
+	Temperature     *float32 `json:"temperature,omitempty"`
+	TopP            *float32 `json:"topP,omitempty"`
+	TopK            *int32   `json:"topK,omitempty"`
+	MaxOutputTokens *int32   `json:"maxOutputTokens,omitempty"`
+	// StopSequences []string `json:"stopSequences,omitempty"`
+}
+
+type GeminiResponse struct {
+	Candidates []struct {
+		Content *GeminiContent `json:"content"`
+		// FinishReason, SafetyRatings, etc.
+	} `json:"candidates"`
+	// PromptFeedback
+}
+
+// Error structure (example, might need adjustment based on actual API errors)
+type GeminiErrorResponse struct {
+	Error struct {
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 // NewGeminiProvider creates an instance of the Gemini provider.
@@ -52,12 +99,13 @@ func NewGeminiProvider(apiKey, model string, extraHeaders map[string]string) pro
 		model:        model,
 		maxTokens:    1024,
 		extraHeaders: make(map[string]string),
+		client:       &http.Client{}, // Initialize standard HTTP client
 		logger:       utils.NewLogger(utils.LogLevelInfo),
 	}
 
 	// Set default model if provided one is empty
 	if provider.model == "" {
-		provider.model = "gemini-2.0-flash"
+		provider.model = "gemini-1.5-flash-latest" // Use the known working model name
 		log.Printf("Gemini model defaulting to %s", provider.model)
 	}
 
@@ -68,25 +116,16 @@ func NewGeminiProvider(apiKey, model string, extraHeaders map[string]string) pro
 		}
 	}
 
-	// Initialize the Gemini client
-	ctx := context.Background()
-	clientOptions := []option.ClientOption{
-		option.WithAPIKey(apiKey),
-		// --- Add Endpoint Override ---
-		// Uncomment the line below to explicitly target the v1beta endpoint
-		//option.WithEndpoint("generativelanguage.googleapis.com:443"), // Base endpoint, library adds path
-		// Or potentially the full path if needed, check genai docs:
-		option.WithEndpoint("https://generativelanguage.googleapis.com/v1beta/"),
-	}
-	client, err := genai.NewClient(ctx, clientOptions...)
-	// Check if the client was created successfully
-	if err != nil {
-		log.Printf("Error creating Gemini client: %v", err)
-		// We'll return the provider anyway and let the actual API calls fail if needed
+	// --- Read Endpoint from Environment Variable ---
+	apiEndpoint := os.Getenv("GEMINI_API_ENDPOINT")
+	if apiEndpoint == "" {
+		// Default to the v1beta base path as it's commonly needed
+		apiEndpoint = "https://generativelanguage.googleapis.com/v1beta/"
+		log.Println("GeminiProvider: GEMINI_API_ENDPOINT not set, using default:", apiEndpoint)
 	} else {
-		provider.geminiClient = client
-		log.Println("Gemini client created successfully.")
+		log.Println("GeminiProvider: Using endpoint from GEMINI_API_ENDPOINT:", apiEndpoint)
 	}
+	provider.baseEndpoint = apiEndpoint // Store the base endpoint
 
 	log.Printf("NewGeminiProvider created: model=%s", provider.model)
 	return provider
@@ -101,8 +140,9 @@ func (p *GeminiProvider) Name() string {
 
 // Endpoint returns the API endpoint URL.
 func (p *GeminiProvider) Endpoint() string {
-	// Gemini uses the Google client library which handles the endpoint internally
-	return "https://generativelanguage.googleapis.com/"
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	return p.baseEndpoint // Return the stored base endpoint
 }
 
 // Headers returns the necessary HTTP headers.
@@ -111,13 +151,10 @@ func (p *GeminiProvider) Headers() map[string]string {
 	defer p.mutex.Unlock()
 
 	headers := map[string]string{
-		"Content-Type": "application/json",
+		"Content-Type": "application/json", // Key is needed in URL now
 		"User-Agent":   "Wordpress-Inference-Engine/1.0",
 	}
-
-	// Add API key header if needed (though the client handles this)
 	if p.apiKey != "" {
-		headers["x-goog-api-key"] = p.apiKey
 	}
 
 	// Add any extra headers
@@ -135,9 +172,29 @@ func (p *GeminiProvider) PrepareRequest(prompt string, options map[string]interf
 
 	log.Printf("GeminiProvider: Preparing request for model %s", p.model)
 
-	// We don't need to return actual bytes since we're using the client library
-	// This is just a placeholder to satisfy the interface
-	return []byte(prompt), nil
+	// Construct the request body manually
+	reqBody := GeminiRequest{
+		Contents: []GeminiContent{
+			{
+				Role: "user", // Assume simple prompt is from user
+				Parts: []GeminiPart{
+					{Text: prompt},
+				},
+			},
+		},
+		GenerationConfig: &GeminiGenerationConfig{
+			// Apply options if needed, similar to how it was done for Cerebras/Deepseek
+			// Temperature: p.temperature,
+			// TopP: p.topP,
+			// TopK: p.topK,
+			// MaxOutputTokens: &maxTokensInt32,
+		},
+	}
+	// TODO: Apply options from the 'options' map to reqBody.GenerationConfig
+
+	// Marshal the request body
+	jsonBytes, err := json.Marshal(reqBody)
+	return jsonBytes, err
 }
 
 // PrepareRequestWithSchema creates a request with JSON schema validation.
@@ -153,16 +210,51 @@ func (p *GeminiProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 
 	log.Printf("GeminiProvider: Preparing request with messages for model %s", p.model)
 
-	// We don't need to return actual bytes since we're using the client library
-	// This is just a placeholder to satisfy the interface
-	return []byte("messages"), nil
+	// Convert messages to Gemini format
+	geminiContents := make([]GeminiContent, 0, len(messages))
+	for _, msg := range messages {
+		role := "user" // Default role
+		if strings.ToLower(msg.Role) == "assistant" || strings.ToLower(msg.Role) == "ai" || strings.ToLower(msg.Role) == "model" {
+			role = "model"
+		}
+		geminiContents = append(geminiContents, GeminiContent{
+			Role:  role,
+			Parts: []GeminiPart{{Text: msg.Content}},
+		})
+	}
+
+	reqBody := GeminiRequest{
+		Contents: geminiContents,
+		// TODO: Apply GenerationConfig from options map
+	}
+	jsonBytes, err := json.Marshal(reqBody)
+	return jsonBytes, err
 }
 
 // ParseResponse extracts the generated text from the API response.
 func (p *GeminiProvider) ParseResponse(body []byte) (string, error) {
 	// This method won't be used directly since we're using the client library
 	// But we need to implement it to satisfy the interface
-	return string(body), nil
+	// Parse the manually constructed response
+	var resp GeminiResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		// Try parsing as error
+		var errResp GeminiErrorResponse
+		if errParseErr := json.Unmarshal(body, &errResp); errParseErr == nil && errResp.Error.Message != "" {
+			return "", fmt.Errorf("gemini API error: %s", errResp.Error.Message)
+		}
+		return "", fmt.Errorf("failed to unmarshal Gemini response: %w", err)
+	}
+
+	if len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil && len(resp.Candidates[0].Content.Parts) > 0 {
+		// Assuming the first part of the first candidate is the text response
+		return resp.Candidates[0].Content.Parts[0].Text, nil
+	}
+
+	// Handle cases with no valid content (e.g., safety blocks, empty response)
+	// TODO: Inspect resp.Candidates[0].FinishReason or PromptFeedback if needed
+	p.logger.Warn("Gemini response parsed but no valid content found", "body", string(body))
+	return "", fmt.Errorf("no valid content found in Gemini response")
 }
 
 // SetExtraHeaders configures additional HTTP headers.
@@ -185,7 +277,8 @@ func (p *GeminiProvider) HandleFunctionCalls(body []byte) ([]byte, error) {
 
 // SupportsJSONSchema indicates whether the provider supports native JSON schema validation.
 func (p *GeminiProvider) SupportsJSONSchema() bool {
-	return true // Gemini supports structured output
+	// Gemini's function calling is the way to get structured output, not direct JSON schema in response_format yet.
+	return false // Set to false for now, can be true if function calling is implemented
 }
 
 // SetDefaultOptions configures provider-specific defaults.
@@ -225,17 +318,7 @@ func (p *GeminiProvider) SetDefaultOptions(cfg *config.Config) {
 	if providerAPIKey != "" && p.apiKey == "" {
 		p.apiKey = providerAPIKey
 		p.logger.Info("Applied default API key for Gemini")
-		// Reinitialize client if API key was just set and client is nil
-		if p.geminiClient == nil {
-			ctx := context.Background()
-			client, err := genai.NewClient(ctx, option.WithAPIKey(p.apiKey))
-			if err != nil {
-				p.logger.Error("Error creating Gemini client after setting default API key", "error", err)
-			} else {
-				p.geminiClient = client
-				p.logger.Info("Gemini client re-initialized with default API key")
-			}
-		}
+		// No client re-initialization needed for http.Client
 	} else if p.apiKey == "" {
 		p.logger.Warn("No default or specific API key found/set for Gemini")
 	}
@@ -275,9 +358,6 @@ func (p *GeminiProvider) SetDefaultOptions(cfg *config.Config) {
 	// 	p.topK = &topKInt32
 	// 	p.logger.Info("Applied global default TopK", "topK", *p.topK)
 	// }
-
-	
-
 
 	p.logger.Info("Default options processing complete for Gemini", "final_model", p.model, "final_maxTokens", p.maxTokens)
 }
@@ -349,21 +429,50 @@ func (p *GeminiProvider) ParseStreamResponse(chunk []byte) (string, error) {
 
 // GenerateContent sends a request to the Gemini API and returns the response.
 func (p *GeminiProvider) GenerateContent(ctx context.Context, prompt string) (string, error) {
-	p.mutex.Lock()
-	client := p.geminiClient
-	model := p.model
-	p.mutex.Unlock()
-
-	if client == nil {
-		p.logger.Error("GeminiProvider: GenerateContent called but client is nil")
-		return "", fmt.Errorf("gemini client not initialized")
+	// Prepare request body using the provider method
+	reqBytes, err := p.PrepareRequest(prompt, nil) // Pass nil options for now
+	if err != nil {
+		return "", fmt.Errorf("failed to prepare Gemini request: %w", err)
 	}
 
-	// Create a model instance
-	genModel := client.GenerativeModel(model)
-
-	// Configure generation settings
 	p.mutex.Lock()
+	model := p.model
+	apiKey := p.apiKey
+	baseEndpoint := p.baseEndpoint
+	httpClient := p.client
+	p.mutex.Unlock()
+
+	if apiKey == "" {
+		return "", fmt.Errorf("gemini API key not set")
+	}
+	if httpClient == nil {
+		return "", fmt.Errorf("http client not initialized")
+	}
+
+	// Construct the full URL manually
+	// Ensure baseEndpoint ends with a slash
+	if !strings.HasSuffix(baseEndpoint, "/") {
+		baseEndpoint += "/"
+	}
+	fullURL := fmt.Sprintf("%smodels/%s:generateContent?key=%s", baseEndpoint, model, apiKey)
+	log.Printf("GeminiProvider (GenerateContent): Constructed URL: %s", fullURL)
+
+	p.logger.Debug("GeminiProvider: Sending HTTP request", "url", fullURL, "body_len", len(reqBytes))
+
+	// Create HTTP request
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewBuffer(reqBytes))
+	if err != nil {
+		return "", fmt.Errorf("failed to create Gemini HTTP request: %w", err)
+	}
+
+	// Set headers (minimal, Content-Type is important)
+	httpReq.Header.Set("Content-Type", "application/json")
+	// Add extra headers if any
+	p.mutex.Lock()
+	for k, v := range p.extraHeaders {
+		httpReq.Header.Set(k, v)
+	}
+	/* // Generation config is now part of the request body
 	if p.temperature != nil {
 		genModel.SetTemperature(*p.temperature)
 	}
@@ -374,8 +483,13 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, prompt string) (st
 		genModel.SetTopK(*p.topK)
 	}
 	genModel.SetMaxOutputTokens(int32(p.maxTokens))
+	*/
 	p.mutex.Unlock()
 
+	// --- Log Request Details Before Sending ---
+	log.Printf("GeminiProvider: Sending Request - Method: %s, URL: %s", httpReq.Method, httpReq.URL.String())
+	log.Printf("GeminiProvider: Sending Request - Headers: %v", httpReq.Header)
+	// --- End Log Request Details ---
 	// --- Add Debug Logging ---
 	p.logger.Debug("GeminiProvider: Attempting GenerateContent", "model", model, "prompt_length", len(prompt))
 	if len(prompt) > 100 {
@@ -385,48 +499,87 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, prompt string) (st
 	}
 	// --- End Debug Logging ---
 
-
-	// Generate content
-	resp, err := genModel.GenerateContent(ctx, genai.Text(prompt))
+	// Send request using http client
+	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		// Log the specific error from the client library
-		p.logger.Error("GeminiProvider: genModel.GenerateContent call failed", "error", err)
-		return "", fmt.Errorf("gemini API call failed: %w", err)
+		p.logger.Error("GeminiProvider: HTTP request failed", "error", err)
+		return "", fmt.Errorf("gemini HTTP request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	// Read response body
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read Gemini response body: %w", err)
 	}
 
-	// Extract the generated text
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return "", fmt.Errorf("empty response from Gemini API")
-	}
-
-	// Extract text from the response
-	var result string
-	for _, part := range resp.Candidates[0].Content.Parts {
-		if textPart, ok := part.(genai.Text); ok {
-			result += string(textPart)
+	// Check status code
+	if httpResp.StatusCode != http.StatusOK {
+		// Log the raw body on error
+		rawBodyOnError := string(respBody)
+		p.logger.Error("GeminiProvider: API returned non-OK status", "status", httpResp.Status, "raw_body", rawBodyOnError)
+		// Try to parse error message
+		var errResp GeminiErrorResponse
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error.Message != "" {
 		}
+		return "", fmt.Errorf("gemini API request failed with status %s", httpResp.Status)
 	}
 	
+	// Parse the response using the provider method
+	result, err := p.ParseResponse(respBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse Gemini response: %w", err)
+	}
+
 	p.logger.Debug("GeminiProvider: GenerateContent successful")
 	return result, nil
 }
 
 // GenerateContentFromMessages sends a conversation to the Gemini API and returns the response.
+// TODO: Refactor to use manual HTTP like GenerateContent
 func (p *GeminiProvider) GenerateContentFromMessages(ctx context.Context, messages []types.MemoryMessage) (string, error) {
-	p.mutex.Lock()
-	client := p.geminiClient
-	model := p.model
-	p.mutex.Unlock()
-
-	if client == nil {
-		return "", fmt.Errorf("gemini client not initialized")
+	// Prepare request body using the provider method
+	reqBytes, err := p.PrepareRequestWithMessages(messages, nil) // Pass nil options for now
+	if err != nil {
+		return "", fmt.Errorf("failed to prepare Gemini messages request: %w", err)
 	}
 
-	// Create a model instance
-	genModel := client.GenerativeModel(model)
-
-	// Configure generation settings
 	p.mutex.Lock()
+	model := p.model
+	apiKey := p.apiKey
+	baseEndpoint := p.baseEndpoint
+	httpClient := p.client
+	p.mutex.Unlock()
+
+	if apiKey == "" {
+		return "", fmt.Errorf("gemini API key not set")
+	}
+	if httpClient == nil {
+		return "", fmt.Errorf("http client not initialized")
+	}
+
+	// Construct the full URL manually
+	if !strings.HasSuffix(baseEndpoint, "/") {
+		baseEndpoint += "/"
+	}
+	fullURL := fmt.Sprintf("%smodels/%s:generateContent?key=%s", baseEndpoint, model, apiKey)
+	log.Printf("GeminiProvider (GenerateContentFromMessages): Constructed URL: %s", fullURL)
+
+	p.logger.Debug("GeminiProvider: Sending HTTP request (messages)", "url", fullURL, "body_len", len(reqBytes))
+
+	// Create HTTP request
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewBuffer(reqBytes))
+	if err != nil {
+		return "", fmt.Errorf("failed to create Gemini HTTP request (messages): %w", err)
+	}
+
+	// Set headers
+	httpReq.Header.Set("Content-Type", "application/json")
+	p.mutex.Lock()
+	for k, v := range p.extraHeaders {
+		httpReq.Header.Set(k, v)
+	}
+	/* // Generation config is now part of the request body
 	if p.temperature != nil {
 		genModel.SetTemperature(*p.temperature)
 	}
@@ -437,8 +590,13 @@ func (p *GeminiProvider) GenerateContentFromMessages(ctx context.Context, messag
 		genModel.SetTopK(*p.topK)
 	}
 	genModel.SetMaxOutputTokens(int32(p.maxTokens))
+	*/
 	p.mutex.Unlock()
 
+	// --- Log Request Details Before Sending ---
+	log.Printf("GeminiProvider: Sending Request (Messages) - Method: %s, URL: %s", httpReq.Method, httpReq.URL.String())
+	log.Printf("GeminiProvider: Sending Request (Messages) - Headers: %v", httpReq.Header)
+	// --- End Log Request Details ---
 	// Convert messages to Gemini format
 	var chat []*genai.Content // Use pointer slice
 	for _, msg := range messages {
@@ -459,40 +617,41 @@ func (p *GeminiProvider) GenerateContentFromMessages(ctx context.Context, messag
 		chat = append(chat, content)
 	}
 
-	// Start chat session and send messages
-	session := genModel.StartChat()
-	session.History = chat // Assign history
+	// Send request using http client
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		// --- Log the specific HTTP client error ---
+		p.logger.Error("GeminiProvider: HTTP request failed (messages)", "error", err)
+		// --- End log ---
+		return "", fmt.Errorf("gemini HTTP request failed (messages): %w", err)
+	}
+	defer httpResp.Body.Close()
 
-	// Send an empty message to get the next response based on history
-	// Or, if the last message was 'user', use that as the prompt
-	var resp *genai.GenerateContentResponse
-	var sendErr error
-	if len(chat) > 0 && chat[len(chat)-1].Role == "user" {
-		// If the last message is user, treat it as the current prompt
-		// Remove it from history before sending
-		lastUserContent := chat[len(chat)-1]
-		session.History = chat[:len(chat)-1]
-		resp, sendErr = session.SendMessage(ctx, lastUserContent.Parts...)
-	} else {
-		// If history ends with model or is empty, send an empty prompt to continue
-		resp, sendErr = session.SendMessage(ctx /* empty parts */)
+	// --- Log Response Status and Headers ---
+	log.Printf("GeminiProvider: Received Response Status: %s", httpResp.Status)
+	log.Printf("GeminiProvider: Received Response Headers: %v", httpResp.Header)
+	// --- End Log ---
+	// Read response body
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read Gemini response body (messages): %w", err)
 	}
 
-
-    // ... Generate content ...
-    if sendErr != nil {
-		return "", fmt.Errorf("gemini API call failed: %w", sendErr)
-	}
-
-    // ... Extract text ...
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return "", fmt.Errorf("empty response from Gemini API")
-	}
-	var result string
-	for _, part := range resp.Candidates[0].Content.Parts {
-		if textPart, ok := part.(genai.Text); ok {
-			result += string(textPart)
+	// Check status code
+	if httpResp.StatusCode != http.StatusOK {
+		// Log the raw body on error
+		rawBodyOnError := string(respBody)
+		p.logger.Error("GeminiProvider: API returned non-OK status (messages)", "status", httpResp.Status, "raw_body", rawBodyOnError)
+		var errResp GeminiErrorResponse
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error.Message != "" {
 		}
+		return "", fmt.Errorf("gemini API request failed with status %s (messages)", httpResp.Status)
+	}
+
+	// Parse the response using the provider method
+	result, err := p.ParseResponse(respBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse Gemini response (messages): %w", err)
 	}
 	return result, nil
 }
@@ -506,54 +665,26 @@ func (p *GeminiProvider) StreamContent(ctx context.Context, prompt string) (chan
 		defer close(textChan)
 		defer close(errChan)
 
+		// TODO: Implement streaming using manual HTTP request
+		// This involves setting "stream":true in the request body,
+		// sending the request, and then reading the response body line by line,
+		// parsing each Server-Sent Event (SSE) chunk.
+		// For now, return an error indicating it's not implemented.
+		errChan <- fmt.Errorf("streaming not yet implemented for manual Gemini HTTP provider")
+		return
 		p.mutex.Lock()
-		client := p.geminiClient
-		model := p.model
+		// if p.temperature != nil {
+		// 	genModel.SetTemperature(*p.temperature) // undefined: genModel
+		// }
+		// if p.topP != nil {
+		// 	genModel.SetTopP(*p.topP) // undefined: genModel
+		// }
+		// if p.topK != nil {
+		// 	genModel.SetTopK(*p.topK) // undefined: genModel
+		// }
+		// genModel.SetMaxOutputTokens(int32(p.maxTokens)) // undefined: genModel
 		p.mutex.Unlock()
 
-		if client == nil {
-			errChan <- fmt.Errorf("gemini client not initialized")
-			return
-		}
-
-		// Create a model instance
-		genModel := client.GenerativeModel(model)
-
-		// Configure generation settings
-		p.mutex.Lock()
-		if p.temperature != nil {
-			genModel.SetTemperature(*p.temperature)
-		}
-		if p.topP != nil {
-			genModel.SetTopP(*p.topP)
-		}
-		if p.topK != nil {
-			genModel.SetTopK(*p.topK)
-		}
-		genModel.SetMaxOutputTokens(int32(p.maxTokens))
-		p.mutex.Unlock()
-
-		// Stream content
-		iter := genModel.GenerateContentStream(ctx, genai.Text(prompt))
-		for {
-			resp, err := iter.Next()
-			if err != nil {
-				if err.Error() == "iterator done" {
-					break
-				}
-				errChan <- fmt.Errorf("gemini API streaming error: %w", err)
-				return
-			}
-
-			// Extract text from the response
-			if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
-				for _, part := range resp.Candidates[0].Content.Parts {
-					if textPart, ok := part.(genai.Text); ok {
-						textChan <- string(textPart)
-					}
-				}
-			}
-		}
 	}()
 
 	return textChan, errChan

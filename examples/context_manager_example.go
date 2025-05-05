@@ -103,8 +103,7 @@ func exampleSentenceChunking(contextMgr *inference.ContextManager) {
 func exampleTokenChunking(contextMgr *inference.ContextManager) {
 	log.Println("\n=== Example 3: Using Token Count Chunking with Custom Options ===")
 	
-	// Create a new context manager with token count chunking and custom options
-	// Note: Need to get the service from the original contextMgr or pass it explicitly
+	// Create a new context manager with token count chunking
 	tokenContextMgr := inference.NewContextManager(
 		inference.ChunkByTokenCount,
 		inference.WithMaxChunkSize(500),

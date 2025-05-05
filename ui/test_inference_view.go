@@ -67,8 +67,9 @@ type TestInferenceView struct {
 	inferenceService *inference.InferenceService
 	window           fyne.Window
 
-	fallbackButton *widget.Button
-	testMOAButton  *widget.Button // <-- ADDED: MOA test button
+	fallbackButton *widget.Button // Test oversized prompt fallback
+	testMOAButton  *widget.Button // Test direct MOA call
+	testGeminiButton *widget.Button // Test direct Gemini call
 	logConsole     *widget.Entry
 }
 
@@ -88,6 +89,9 @@ func (v *TestInferenceView) initialize() {
 
 	// --- ADDED: MOA Test Button ---
 	v.testMOAButton = widget.NewButton("Test with MOA (Simple Prompt)", v.handleMOATest)
+
+	// --- ADDED: Gemini Test Button ---
+	v.testGeminiButton = widget.NewButton("Test Gemini Endpoint (Simple Prompt)", v.handleGeminiTest)
 	// --- End Added ---
 
 	v.logConsole = widget.NewMultiLineEntry()
@@ -101,6 +105,7 @@ func (v *TestInferenceView) initialize() {
 		widget.NewLabel("Test Inference Mechanisms"),
 		v.fallbackButton,
 		v.testMOAButton, // Add MOA button
+		v.testGeminiButton, // Add Gemini button
 	)
 
 	v.container = container.NewBorder(
@@ -177,6 +182,42 @@ func (v *TestInferenceView) handleMOATest() {
 	}()
 }
 
+// --- ADDED: handleGeminiTest ---
+// handleGeminiTest sends a simple prompt directly to the configured Gemini provider
+func (v *TestInferenceView) handleGeminiTest() {
+	if !v.inferenceService.IsRunning() {
+		dialog.ShowInformation("Service Error", "Inference service is not running. Check settings and logs.", v.window)
+		return
+	}
+
+	// Use a simple, standard prompt for Gemini testing
+	testPrompt := "What is Google Gemini?"
+	log.Println("UI: Preparing simple prompt for Gemini test...")
+
+	progressMsg := "Sending prompt directly to Gemini..."
+	log.Printf("UI: Initiating Gemini test...")
+	progress := dialog.NewProgressInfinite("Testing Gemini", progressMsg, v.window)
+	progress.Show()
+
+	go func() {
+		defer progress.Hide()
+		// Call a new method in InferenceService to target a specific provider
+		response, err := v.inferenceService.GenerateTextWithProvider("gemini", testPrompt)
+
+		if err != nil {
+			log.Printf("UI Error: Gemini test failed: %v", err)
+			// Check specifically for the 404 error we saw earlier
+			if strings.Contains(err.Error(), "status 404") {
+				dialog.ShowError(fmt.Errorf("Gemini test failed with 404 Not Found.\nPlease check the API endpoint configuration in gemini_provider.go.\n\nError: %w", err), v.window)
+			} else {
+				dialog.ShowError(fmt.Errorf("Gemini test failed:\n%w\n\nCheck log console for details.", err), v.window)
+			}
+			return
+		}
+		log.Printf("UI: Gemini test completed successfully (response length: %d). Check log console for trace.", len(response))
+		dialog.ShowInformation("Gemini Test Complete", "Request finished via Gemini. Check the log console below for the trace.", v.window)
+	}()
+}
 // --- End Added ---
 
 // Container returns the main container for this view

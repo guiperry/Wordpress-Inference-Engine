@@ -58,7 +58,10 @@ func NewInferenceService() *InferenceService {
 		primaryAttempts:  make([]LLMAttempt, 0),
 		fallbackAttempts: make([]LLMAttempt, 0),
 		// Initialize ContextManager with default strategy
-		contextManager:   NewContextManager(ChunkByParagraph),
+		contextManager:   NewContextManager(
+			ChunkByTokenCount, // Use token count for better splitting
+			WithProcessingMode(SequentialProcessing), // Default to sequential
+		),
 	}
 }
 
@@ -74,9 +77,9 @@ func (s *InferenceService) Start() error {
 		{ProviderName: "cerebras", ModelName: "llama-4-scout-17b-16e-instruct", APIKeyEnvVar: "CEREBRAS_API_KEY", MaxTokens: 4000, IsPrimary: true},
 		// {ProviderName: "cerebras", ModelName: "some-other-cerebras-model", APIKeyEnvVar: "CEREBRAS_API_KEY", MaxTokens: 8000, IsPrimary: true}, // Example: another primary
 		// {ProviderName: "cerebras", ModelName: "llama-4-scout-17b-16e-instruct", APIKeyEnvVar: "CEREBRAS_API_KEY_2", MaxTokens: 4000, IsPrimary: true}, // Example: different key
-		{ProviderName: "gemini", ModelName: "gemini-1.5-flash-latest", APIKeyEnvVar: "GEMINI_API_KEY", MaxTokens: 100000, IsPrimary: false}, // Fallback 1
-		{ProviderName: "gemini", ModelName: "gemini-1.5-pro-latest", APIKeyEnvVar: "GEMINI_API_KEY", MaxTokens: 1000000, IsPrimary: false}, // Fallback 2
-		{ProviderName: "deepseek", ModelName: "deepseek-chat", APIKeyEnvVar: "DEEPSEEK_API_KEY", MaxTokens: 8000, IsPrimary: false}, // Fallback 3 (Adjust MaxTokens if needed)
+		{ProviderName: "gemini", ModelName: "gemini-1.5-flash-latest", APIKeyEnvVar: "GEMINI_API_KEY", MaxTokens: 100000, IsPrimary: false},    // Fallback 1 (Use working model name)
+		{ProviderName: "deepseek", ModelName: "deepseek-chat", APIKeyEnvVar: "DEEPSEEK_API_KEY", MaxTokens: 8000, IsPrimary: false},          // Fallback 2 (Target for final chunking)
+		// {ProviderName: "gemini", ModelName: "gemini-1.5-pro-latest", APIKeyEnvVar: "GEMINI_API_KEY", MaxTokens: 1000000, IsPrimary: false}, // Fallback 3 (Example: Use Pro if needed)
 	}
 
 	s.primaryAttempts = make([]LLMAttempt, 0)
@@ -209,6 +212,31 @@ func (s *InferenceService) GenerateText(promptText string) (string, error) {
 	}
 	log.Println("InferenceService: Generation successful via DelegatorService.")
 	return response, nil
+}
+
+// --- ADDED: GenerateTextWithProvider ---
+// GenerateTextWithProvider sends a prompt directly to the first configured instance of a specific provider.
+func (s *InferenceService) GenerateTextWithProvider(providerName string, promptText string) (string, error) {
+	s.mutex.Lock()
+	if !s.isRunning {
+		s.mutex.Unlock()
+		return "", errors.New("inference service is not running")
+	}
+	// Find the specific LLM instance
+	llmInstance := s.findLLMInstance(providerName)
+	if llmInstance == nil {
+		s.mutex.Unlock()
+		return "", fmt.Errorf("provider '%s' not found or not configured", providerName)
+	}
+	s.mutex.Unlock() // Unlock before making the potentially long call
+
+	ctx := context.Background() // Consider allowing context passing
+	log.Printf("InferenceService: Delegating direct generation request to provider '%s'...", providerName)
+
+	// Use the llm.NewPrompt helper from the gollm library
+	prompt := llm.NewPrompt(promptText)
+
+	return llmInstance.Generate(ctx, prompt)
 }
 
 // --- ADDED: GenerateTextWithMOA ---

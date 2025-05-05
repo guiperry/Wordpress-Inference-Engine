@@ -432,9 +432,12 @@ func (v *ContentManagerView) loadPagePreview(pageURL string) {
 	v.previewImage.Refresh()
 
 	go func() {
-		defer progress.Hide() // Ensure progress dialog is hidden
+		// Don't use defer for hiding; hide explicitly before showing other dialogs.
+		// defer progress.Hide()
 
 		imgBytes, err := v.wpService.GetPageScreenshot(pageURL)
+		// Hide progress *before* potentially showing an error dialog.
+		progress.Hide()
 		if err != nil {
 			log.Printf("Error getting page screenshot: %v", err)
 			dialog.ShowError(fmt.Errorf("failed to load preview for %s: %w", pageURL, err), v.window)

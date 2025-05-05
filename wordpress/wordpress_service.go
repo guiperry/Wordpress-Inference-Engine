@@ -362,22 +362,21 @@ func (s *WordPressService) IsConnected() bool {
 
 // GetPages fetches a list of pages from the WordPress site using pagination
 func (s *WordPressService) GetPages(page, perPage int) (PageList, error) {
-	s.mutex.Lock()
-	if !s.isConnected {
-		s.mutex.Unlock()
-		return nil, fmt.Errorf("not connected to WordPress site")
-	}
-	siteURL := s.siteURL
-	username := s.username
-	appPassword := s.appPassword
-	s.mutex.Unlock()
+    s.mutex.Lock()
+    if !s.isConnected {
+        s.mutex.Unlock()
+        return nil, fmt.Errorf("not connected to WordPress site")
+    }
+    siteURL := s.siteURL
+    username := s.username
+    appPassword := s.appPassword
+    s.mutex.Unlock()
 
-	var allPages []map[string]interface{} // Store results from all pages
-	currentPage := 1
-	perPage = 10 // Fetch 10 pages per request
-	totalPages := 1 // Initialize to 1, will be updated after the first request
+    var allPages []map[string]interface{} // Store results from all pages
+    currentPage := 1
+    totalPages := 1 // Initialize to 1, will be updated after the first request
 
-	log.Printf("wpService.GetPages: Starting pagination fetch (perPage=%d)", perPage)
+    log.Printf("wpService.GetPages: Starting pagination fetch (perPage=%d)", perPage)
 
 	for { // Loop indefinitely until we determine total pages or finish
 		// Create request URL with pagination parameters
@@ -610,16 +609,22 @@ func (s *WordPressService) UpdatePageContent(pageID int, newContent string) erro
 // Disconnect closes the connection to the WordPress site
 func (s *WordPressService) Disconnect() {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
+	// Reset state while holding the lock
 	s.isConnected = false
 	s.siteURL = ""
 	s.username = ""
 	s.appPassword = ""
 	s.currentSiteName = ""
 
-	if s.siteChangeCallback != nil {
-		s.siteChangeCallback()
+	// Capture the callback function while holding the lock
+	callback := s.siteChangeCallback
+
+	// Release the lock BEFORE calling the callback
+	s.mutex.Unlock()
+
+	// Call the callback after the lock is released
+	if callback != nil {
+		callback() // Use the local 'callback' variable
 	}
 }
 
