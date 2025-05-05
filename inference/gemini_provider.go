@@ -2,11 +2,9 @@
 package inference
 
 import (
-	"bytes" // Import bytes package
 	"context"
 	"encoding/json" // Import json package
 	"fmt"
-	"io"
 	"log"
 	"net/http" // Import net/http package
 	"strings"
@@ -145,12 +143,17 @@ func (p *GeminiProvider) Endpoint() string {
 	p.mutex.Lock()
 	base := p.baseEndpoint
 	model := p.model
+	apiKey := p.apiKey // Get API key
 	p.mutex.Unlock()
 
 	if !strings.HasSuffix(base, "/") {
 		base += "/"
 	}
-	return fmt.Sprintf("%smodels/%s:generateContent", base, model) // Return full path excluding API key
+	// Append the API key as a query parameter
+	if apiKey == "" {
+		p.logger.Error("Gemini API key is missing when constructing endpoint URL") // Log error if key missing
+	}
+	return fmt.Sprintf("%smodels/%s:generateContent?key=%s", base, model, apiKey)
 }
 
 // Headers returns the necessary HTTP headers.
@@ -159,15 +162,11 @@ func (p *GeminiProvider) Headers() map[string]string {
 	defer p.mutex.Unlock()
 
 	headers := map[string]string{
-		"Content-Type": "application/json", // Key is needed in URL now
+		"Content-Type": "application/json", // Key is now in the URL
 		"User-Agent":   "Wordpress-Inference-Engine/1.0",
 	}
-	// Add Authorization header - gollm might expect the provider to supply this
-	if p.apiKey != "" {
-		headers["Authorization"] = "Bearer " + p.apiKey // Add Bearer token
-	} else {
-		p.logger.Warn("Gemini API key is missing when generating headers")
-	}
+	// --- REMOVED Authorization Header ---
+	// The API key is passed via the URL parameter, not this header.
 
 	// Add any extra headers
 	for k, v := range p.extraHeaders {
@@ -336,10 +335,10 @@ func (p *GeminiProvider) SetDefaultOptions(cfg *config.Config) {
 	}
 
 	// Set model: Prioritize provider-specific, then global, then keep existing default
-	if providerModel != "" && (p.model == "" || p.model == "gemini-2.0-flash") {
+	if providerModel != "" && (p.model == "" || p.model == "gemini-1.5-flash-latest") { // Updated default check
 		p.model = providerModel
 		p.logger.Info("Applied provider-specific default model", "model", p.model)
-	} else if cfg.Model != "" && (p.model == "" || p.model == "gemini-2.0-flash") {
+	} else if cfg.Model != "" && (p.model == "" || p.model == "gemini-1.5-flash-latest") { // Updated default check
 		p.model = cfg.Model // Fallback to global default model
 		p.logger.Info("Applied global default model", "model", p.model)
 	}
@@ -445,10 +444,12 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, prompt string) (st
 	// which uses PrepareRequest, Endpoint, Headers, and ParseResponse.
 	// Keep it simple or log a warning if it's unexpectedly called.
 	p.logger.Warn("GenerateContent called directly - this might bypass gollm's standard flow.")
-	
+
 	// Prepare request body using the provider method
-	reqBytes, err := p.PrepareRequest(prompt, nil) // Pass nil options for now
-	
+	_, err := p.PrepareRequest(prompt, nil) // Pass nil options for now
+	if err != nil {
+		return "", fmt.Errorf("failed to prepare Gemini request: %w", err)
+	}
 
 	p.mutex.Lock()
 	model := p.model
@@ -457,49 +458,52 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, prompt string) (st
 	httpClient := p.client
 	p.mutex.Unlock()
 
-
+	if apiKey == "" {
+		return "", fmt.Errorf("gemini API key not set")
+	}
+	if httpClient == nil {
+		return "", fmt.Errorf("http client not initialized")
+	}
 
 	// Construct the full URL manually
 	// Ensure baseEndpoint ends with a slash
 	if !strings.HasSuffix(baseEndpoint, "/") {
 		baseEndpoint += "/"
 	}
-	fullURL := fmt.Sprintf("%smodels/%s:generateContent?key=%s", baseEndpoint, model, apiKey)
-	log.Printf("GeminiProvider (GenerateContent): Constructed URL: %s", fullURL)
+	_ = fmt.Sprintf("%smodels/%s:generateContent?key=%s", baseEndpoint, model, apiKey)
+	// --- REMOVED: Manual HTTP Request Logic ---
+	// The gollm library should handle the actual HTTP call using Endpoint(), Headers(), PrepareRequest(), ParseResponse().
+	// If this method IS called, it means something is using it directly.
+	// For now, return an error or a placeholder.
+	return "", fmt.Errorf("direct call to GeminiProvider.GenerateContent is not the standard gollm flow")
+	/*
 
-	p.logger.Debug("GeminiProvider: Sending HTTP request", "url", fullURL, "body_len", len(reqBytes))
+		log.Printf("GeminiProvider (GenerateContent): Constructed URL: %s", fullURL)
 
-	// Create HTTP request
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewBuffer(reqBytes))
-	if err != nil {
-		return "", fmt.Errorf("failed to create Gemini HTTP request: %w", err)
-	}
+		p.logger.Debug("GeminiProvider: Sending HTTP request", "url", fullURL, "body_len", len(reqBytes))
 
-	// Set headers (minimal, Content-Type is important)
-	httpReq.Header.Set("Content-Type", "application/json")
-	// Add extra headers if any
-	p.mutex.Lock()
-	for k, v := range p.extraHeaders {
-		httpReq.Header.Set(k, v)
-	}
-	/* // Generation config is now part of the request body
-	if p.temperature != nil {
-		genModel.SetTemperature(*p.temperature)
-	}
-	if p.topP != nil {
-		genModel.SetTopP(*p.topP)
-	}
-	if p.topK != nil {
-		genModel.SetTopK(*p.topK)
-	}
-	genModel.SetMaxOutputTokens(int32(p.maxTokens))
-	*/
-	p.mutex.Unlock()
+		// Create HTTP request
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewBuffer(reqBytes))
+		if err != nil {
+			return "", fmt.Errorf("failed to create Gemini HTTP request: %w", err)
+		}
 
-	// --- Log Request Details Before Sending ---
-	log.Printf("GeminiProvider: Sending Request - Method: %s, URL: %s", httpReq.Method, httpReq.URL.String())
-	log.Printf("GeminiProvider: Sending Request - Headers: %v", httpReq.Header)
-	// --- End Log Request Details ---
+		// Set headers (minimal, Content-Type is important)
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		/* // Generation config is now part of the request body
+		if p.temperature != nil {
+			genModel.SetTemperature(*p.temperature)
+		}
+		if p.topP != nil {
+			genModel.SetTopP(*p.topP)
+		}
+		if p.topK != nil {
+			genModel.SetTopK(*p.topK)
+		}
+		genModel.SetMaxOutputTokens(int32(p.maxTokens))
+		*/
+
 	// --- Add Debug Logging ---
 	p.logger.Debug("GeminiProvider: Attempting GenerateContent", "model", model, "prompt_length", len(prompt))
 	if len(prompt) > 100 {
@@ -509,47 +513,17 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, prompt string) (st
 	}
 	// --- End Debug Logging ---
 
-	// Send request using http client
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		p.logger.Error("GeminiProvider: HTTP request failed", "error", err)
-		return "", fmt.Errorf("gemini HTTP request failed: %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	// Read response body
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read Gemini response body: %w", err)
-	}
-
-	// Check status code
-	if httpResp.StatusCode != http.StatusOK {
-		// Log the raw body on error
-		rawBodyOnError := string(respBody)
-		p.logger.Error("GeminiProvider: API returned non-OK status", "status", httpResp.Status, "raw_body", rawBodyOnError)
-		// Try to parse error message
-		var errResp GeminiErrorResponse
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error.Message != "" {
-		}
-		return "", fmt.Errorf("gemini API request failed with status %s", httpResp.Status)
-	}
+	// HTTP request logic removed - handled by gollm
+	return "", fmt.Errorf("direct call to GeminiProvider.GenerateContent is not the standard gollm flow")
 	
-	// Parse the response using the provider method
-	result, err := p.ParseResponse(respBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse Gemini response: %w", err)
-	}
-
-	p.logger.Debug("GeminiProvider: GenerateContent successful")
-	return result, nil
 }
 
 // GenerateContentFromMessages sends a conversation to the Gemini API and returns the response.
-// TODO: Refactor to use manual HTTP like GenerateContent
+
 func (p *GeminiProvider) GenerateContentFromMessages(ctx context.Context, messages []types.MemoryMessage) (string, error) {
+	p.logger.Warn("GenerateContentFromMessages called directly - this might bypass gollm's standard flow.")
 	// Prepare request body using the provider method
-	reqBytes, err := p.PrepareRequestWithMessages(messages, nil) // Pass nil options for now
+	_, err := p.PrepareRequestWithMessages(messages, nil) // Pass nil options for now
 	if err != nil {
 		return "", fmt.Errorf("failed to prepare Gemini messages request: %w", err)
 	}
@@ -575,38 +549,37 @@ func (p *GeminiProvider) GenerateContentFromMessages(ctx context.Context, messag
 	fullURL := fmt.Sprintf("%smodels/%s:generateContent?key=%s", baseEndpoint, model, apiKey)
 	log.Printf("GeminiProvider (GenerateContentFromMessages): Constructed URL: %s", fullURL)
 
-	p.logger.Debug("GeminiProvider: Sending HTTP request (messages)", "url", fullURL, "body_len", len(reqBytes))
+	// --- REMOVED: Manual HTTP Request Logic ---
+	return "", fmt.Errorf("direct call to GeminiProvider.GenerateContentFromMessages is not the standard gollm flow")
+	/*
+		p.logger.Debug("GeminiProvider: Sending HTTP request (messages)", "url", fullURL, "body_len", len(reqBytes))
 
-	// Create HTTP request
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewBuffer(reqBytes))
-	if err != nil {
-		return "", fmt.Errorf("failed to create Gemini HTTP request (messages): %w", err)
-	}
+		// Create HTTP request
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewBuffer(reqBytes))
+		if err != nil {
+			return "", fmt.Errorf("failed to create Gemini HTTP request (messages): %w", err)
+		}
 
-	// Set headers
-	httpReq.Header.Set("Content-Type", "application/json")
-	p.mutex.Lock()
-	for k, v := range p.extraHeaders {
-		httpReq.Header.Set(k, v)
-	}
-	/* // Generation config is now part of the request body
-	if p.temperature != nil {
-		genModel.SetTemperature(*p.temperature)
-	}
-	if p.topP != nil {
-		genModel.SetTopP(*p.topP)
-	}
-	if p.topK != nil {
-		genModel.SetTopK(*p.topK)
-	}
-	genModel.SetMaxOutputTokens(int32(p.maxTokens))
-	*/
+		// Set headers
+		httpReq.Header.Set("Content-Type", "application/json")
+		p.mutex.Lock()
+		for k, v := range p.extraHeaders {
+			httpReq.Header.Set(k, v)
+		}
+		/* // Generation config is now part of the request body
+		if p.temperature != nil {
+			genModel.SetTemperature(*p.temperature)
+		}
+		if p.topP != nil {
+			genModel.SetTopP(*p.topP)
+		}
+		if p.topK != nil {
+			genModel.SetTopK(*p.topK)
+		}
+		genModel.SetMaxOutputTokens(int32(p.maxTokens))
+		*/
 	p.mutex.Unlock()
 
-	// --- Log Request Details Before Sending ---
-	log.Printf("GeminiProvider: Sending Request (Messages) - Method: %s, URL: %s", httpReq.Method, httpReq.URL.String())
-	log.Printf("GeminiProvider: Sending Request (Messages) - Headers: %v", httpReq.Header)
-	// --- End Log Request Details ---
 	// Convert messages to Gemini format
 	var chat []*genai.Content // Use pointer slice
 	for _, msg := range messages {
@@ -627,43 +600,9 @@ func (p *GeminiProvider) GenerateContentFromMessages(ctx context.Context, messag
 		chat = append(chat, content)
 	}
 
-	// Send request using http client
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		// --- Log the specific HTTP client error ---
-		p.logger.Error("GeminiProvider: HTTP request failed (messages)", "error", err)
-		// --- End log ---
-		return "", fmt.Errorf("gemini HTTP request failed (messages): %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	// --- Log Response Status and Headers ---
-	log.Printf("GeminiProvider: Received Response Status: %s", httpResp.Status)
-	log.Printf("GeminiProvider: Received Response Headers: %v", httpResp.Header)
-	// --- End Log ---
-	// Read response body
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read Gemini response body (messages): %w", err)
-	}
-
-	// Check status code
-	if httpResp.StatusCode != http.StatusOK {
-		// Log the raw body on error
-		rawBodyOnError := string(respBody)
-		p.logger.Error("GeminiProvider: API returned non-OK status (messages)", "status", httpResp.Status, "raw_body", rawBodyOnError)
-		var errResp GeminiErrorResponse
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error.Message != "" {
-		}
-		return "", fmt.Errorf("gemini API request failed with status %s (messages)", httpResp.Status)
-	}
-
-	// Parse the response using the provider method
-	result, err := p.ParseResponse(respBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse Gemini response (messages): %w", err)
-	}
-	return result, nil
+	// HTTP request logic removed - handled by gollm
+	return "", fmt.Errorf("direct call to GeminiProvider.GenerateContentFromMessages is not the standard gollm flow")
+	
 }
 
 // StreamContent streams a response from the Gemini API.
