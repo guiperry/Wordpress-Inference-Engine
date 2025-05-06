@@ -191,8 +191,8 @@ func (s *InferenceService) Stop() error {
 }
 
 // GenerateText delegates to the DelegatorService.
-func (s *InferenceService) GenerateText(promptText string) (string, error) {
-	s.mutex.Lock()
+func (s *InferenceService) GenerateText(modelName string, promptText string, instructionText string) (string, error) {
+	s.mutex.Lock() // Lock at the beginning
 	if !s.isRunning || s.delegator == nil {
 		s.mutex.Unlock()
 		return "", errors.New("inference service is not running or delegator not configured")
@@ -201,11 +201,11 @@ func (s *InferenceService) GenerateText(promptText string) (string, error) {
 	s.mutex.Unlock()
 
 	ctx := context.Background()
-	log.Println("InferenceService: Delegating generation request to DelegatorService...")
+	log.Printf("InferenceService: Delegating generation request to DelegatorService. Model: '%s', Instruction: '%s'", modelName, instructionText)
 	// --- Adapt GenerateText to potentially use ContextManager ---
 	// The delegator will now handle the potential call to ContextManager internally
-	// So, we still call GenerateSimple here.
-	response, err := delegatorInstance.GenerateSimple(ctx, promptText)
+	// Pass modelName and instructionText to the delegator
+	response, err := delegatorInstance.GenerateSimple(ctx, modelName, promptText, instructionText)
 	// --- End Adapt ---
 	if err != nil {
 		return "", err

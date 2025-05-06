@@ -152,7 +152,7 @@ func (d *DelegatorService) shouldFallbackOnError(err error) bool {
 }
 
 // executeGenerationWithRetry attempts generation using a sequence of LLMs, handling retries and fallbacks.
-func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, messages []gollm_types.MemoryMessage, operationName string) (string, error) {
+func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, modelName string, messages []gollm_types.MemoryMessage, instructionText string, operationName string) (string, error) {
 	if len(d.primaryAttempts) == 0 || len(d.fallbackAttempts) == 0 {
 		return "", fmt.Errorf("delegator service (%s): not properly configured", operationName)
 	}
@@ -162,7 +162,7 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, messa
 
 	// Estimate tokens using the designated model for limit checking
 	estimatedTokens := estimateTotalTokens(messages, d.tokenLimitCheckModel)
-	log.Printf("DelegatorService (%s): Estimated tokens for request: %d (Limit: %d, Check Model: %s)",
+	log.Printf("DelegatorService (%s): Estimated tokens for request: %d (Limit: %d, Check Model: %s). Requested Model: '%s'",
 	operationName, estimatedTokens, d.tokenLimitThreshold, d.tokenLimitCheckModel) // Log estimation, but don't bypass primary based on it.
 
 	// --- ADDED: Proactive Chunking Check ---
@@ -189,25 +189,49 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, messa
 	}
 	// --- END Proactive Chunking Check ---
 
-	startedWithFallback := false
-	attemptsToTry := d.primaryAttempts
+	var attemptsToTry []LLMAttempt
+	specificModelRequested := modelName != "" && modelName != "No models available" && modelName != "Service unavailable"
 
-	// Convert messages to a single prompt string for the Generate method
+	if specificModelRequested {
+		log.Printf("DelegatorService (%s): Specific model '%s' requested. Attempting to find and use it.", operationName, modelName)
+		found := false
+		for _, attempt := range append(d.primaryAttempts, d.fallbackAttempts...) {
+			if attempt.Config.ModelName == modelName {
+				attemptsToTry = []LLMAttempt{attempt}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("delegator service (%s): requested model '%s' not found in configured attempts", operationName, modelName)
+		}
+	} else {
+		attemptsToTry = d.primaryAttempts // Default to primary list if no specific model
+	}
+
+	// Convert messages to a single prompt string
 	promptString := formatMessagesToPrompt(messages)
-	prompt := llm.NewPrompt(promptString) // gollm expects a Prompt object
+	_ = llm.NewPrompt(promptString) // gollm expects a Prompt object, assign to blank identifier if not used directly
 
 	var lastError error
 	currentAttemptList := attemptsToTry
 
 	for listNum := 0; listNum < 2; listNum++ { // Max 2 lists: primary then fallback (or just fallback)
-		listName := "Primary"
-		if (listNum == 0 && startedWithFallback) || (listNum == 1 && !startedWithFallback) {
-			listName = "Fallback"
-			if listNum == 1 { // Only switch to fallback list if primary failed
+		if specificModelRequested && listNum > 0 { // If specific model was requested, only try that list (which is `attemptsToTry`)
+			break
+		}
+
+		listName := "Primary/Specified"
+		if !specificModelRequested { // Only consider switching to fallback if no specific model was requested
+			if listNum == 0 {
+				listName = "Primary"
+				currentAttemptList = d.primaryAttempts
+			} else if listNum == 1 && lastError != nil { // Only switch to fallback if primary failed
+				listName = "Fallback"
 				log.Printf("DelegatorService (%s): Primary attempts failed. Switching to fallback attempts.", operationName)
 				currentAttemptList = d.fallbackAttempts
 			}
-		} else if listNum == 1 && startedWithFallback {
+		} else if listNum == 1 { // This case should not be hit if specificModelRequested is true due to the break above
 			break // Already tried fallback, don't try primary
 		}
 
@@ -215,7 +239,13 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, messa
 			targetName := fmt.Sprintf("%s Attempt %d/%d (Model: %s)", listName, i+1, len(currentAttemptList), attempt.Config.ModelName)
 			log.Printf("DelegatorService (%s): Trying %s", operationName, targetName)
 
-			responseContent, err := attempt.Instance.Generate(ctx, prompt)
+			// --- Incorporate Instruction Text ---
+			finalPromptStringForLLM := promptString
+			if instructionText != "" {
+				finalPromptStringForLLM = "Instructions:\n" + instructionText + "\n\n---\n\n" + promptString
+			}
+			finalPromptForLLM := llm.NewPrompt(finalPromptStringForLLM)
+			responseContent, err := attempt.Instance.Generate(ctx, finalPromptForLLM)
 
 			if err == nil {
 				log.Printf("DelegatorService (%s): Generation successful with %s.", operationName, targetName)
@@ -260,7 +290,7 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, messa
 		}
 
 		// If we finished a list and haven't succeeded, decide if we should try the *next* list
-		if listNum == 0 && !startedWithFallback && lastError != nil {
+		if listNum == 0 && !specificModelRequested && lastError != nil {
 			// Primary list failed, continue to fallback list (outer loop handles this)
 			continue
 		} else {
@@ -335,8 +365,8 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, messa
 
 // GenerateSimple uses standard delegation/fallback ONLY.
 // It now uses the conversation memory.
-func (d *DelegatorService) GenerateSimple(ctx context.Context, promptText string) (string, error) {
-	userMessage := gollm_types.MemoryMessage{Role: "user", Content: promptText}
+func (d *DelegatorService) GenerateSimple(ctx context.Context, modelName string, promptText string, instructionText string) (string, error) {
+	userMessage := gollm_types.MemoryMessage{Role: "user", Content: promptText} // Instruction is handled separately
 
 	// Add user prompt to memory
 	d.memory.AddMessage(userMessage)
@@ -344,7 +374,10 @@ func (d *DelegatorService) GenerateSimple(ctx context.Context, promptText string
 	var messagesForContext []gollm_types.MemoryMessage
 
 	// Estimate tokens for the *current* message only
-	currentMessageTokens := estimateTokens(userMessage.Content, d.tokenLimitCheckModel)
+	// Token estimation for context should consider the model being targeted if specific, else the default check model.
+	tokenCheckModelForContext := d.tokenLimitCheckModel
+	if modelName != "" { tokenCheckModelForContext = modelName }
+	currentMessageTokens := estimateTokens(userMessage.Content, tokenCheckModelForContext)
 
 	if currentMessageTokens > d.tokenLimitThreshold {
 		// If the current message ALONE exceeds the limit, send only it to the fallback logic
@@ -352,7 +385,7 @@ func (d *DelegatorService) GenerateSimple(ctx context.Context, promptText string
 		messagesForContext = []gollm_types.MemoryMessage{userMessage}
 	} else {
 		// Otherwise, try to get history including the current message, respecting the limit
-		messagesForContext = d.memory.GetMessagesForContext(d.tokenLimitThreshold)
+		messagesForContext = d.memory.GetMessagesForContext(d.tokenLimitThreshold, tokenCheckModelForContext)
 		if len(messagesForContext) == 0 {
 			// This should ideally not happen if currentMessageTokens <= proxyTokenLimit, but handle defensively
 			log.Printf("DelegatorService (Simple): Warning - GetMessagesForContext returned empty despite current prompt fitting. Sending only current prompt.")
@@ -362,7 +395,7 @@ func (d *DelegatorService) GenerateSimple(ctx context.Context, promptText string
 	}
 
 	// MOA is NOT used for simple generation in this design
-	return d.executeGenerationWithRetry(ctx, messagesForContext, "Simple")
+	return d.executeGenerationWithRetry(ctx, modelName, messagesForContext, instructionText, "Simple")
 }
 
 // GenerateWithCoT uses MOA if available, otherwise standard fallback.
@@ -413,7 +446,7 @@ func (d *DelegatorService) GenerateWithCoT(ctx context.Context, promptText strin
 	cotMessage := gollm_types.MemoryMessage{Role: "user", Content: cotPromptText}
 	// We pass only this message for the CoT attempt, ignoring history for this specific fallback.
 	// This assumes CoT doesn't need prior context from memory for this step.
-	fullResponse, err := d.executeGenerationWithRetry(ctx, []gollm_types.MemoryMessage{cotMessage}, "CoT-Fallback")
+	fullResponse, err := d.executeGenerationWithRetry(ctx, "", []gollm_types.MemoryMessage{cotMessage}, "", "CoT-Fallback") // No specific model, no instruction for this internal step
 	if err != nil {
 		return "", err // Error already includes context from helper
 	}
@@ -452,11 +485,11 @@ func (d *DelegatorService) GenerateWithReflection(ctx context.Context, promptTex
 
 		log.Println("DelegatorService (Reflection-Initial): Using standard generation...")
 		// Get messages for context
-		messagesForContext := d.memory.GetMessagesForContext(d.tokenLimitThreshold)
+		messagesForContext := d.memory.GetMessagesForContext(d.tokenLimitThreshold, d.tokenLimitCheckModel) // Use default check model
 		if len(messagesForContext) == 0 {
 			return "", fmt.Errorf("reflection initial generation: No messages fit context window")
 		}
-		initialResponse, err = d.executeGenerationWithRetry(ctx, messagesForContext, "Reflection-Initial")
+		initialResponse, err = d.executeGenerationWithRetry(ctx, "", messagesForContext, "", "Reflection-Initial") // No specific model, no instruction
 	}
 
 	// Handle final error from Step 1
@@ -497,11 +530,11 @@ func (d *DelegatorService) GenerateWithReflection(ctx context.Context, promptTex
 
 		log.Println("DelegatorService (Reflection-Reflect): Using standard generation...")
 		// Get messages for context (including the reflection prompt)
-		messagesForContext := d.memory.GetMessagesForContext(d.tokenLimitThreshold)
+		messagesForContext := d.memory.GetMessagesForContext(d.tokenLimitThreshold, d.tokenLimitCheckModel) // Use default check model
 		if len(messagesForContext) == 0 {
 			return "", fmt.Errorf("reflection refinement generation: No messages fit context window")
 		}
-		finalResponse, err = d.executeGenerationWithRetry(ctx, messagesForContext, "Reflection-Reflect")
+		finalResponse, err = d.executeGenerationWithRetry(ctx, "", messagesForContext, "", "Reflection-Reflect") // No specific model, no instruction
 	}
 
 	// Handle final error from Step 3
@@ -550,11 +583,11 @@ func (d *DelegatorService) GenerateStructuredOutput(ctx context.Context, content
 	if response == "" {
 		log.Println("DelegatorService (StructuredOutput): Using standard generation...")
 		// Get messages for context (including the structured prompt)
-		messagesForContext := d.memory.GetMessagesForContext(d.tokenLimitThreshold)
+		messagesForContext := d.memory.GetMessagesForContext(d.tokenLimitThreshold, d.tokenLimitCheckModel) // Use default check model
 		if len(messagesForContext) == 0 {
 			return "", fmt.Errorf("structured output generation: No messages fit context window")
 		}
-		response, err = d.executeGenerationWithRetry(ctx, messagesForContext, "StructuredOutput")
+		response, err = d.executeGenerationWithRetry(ctx, "", messagesForContext, "", "StructuredOutput") // No specific model, no instruction
 		// Note: response is added to memory inside executeGenerationWithFallback on success
 	}
 

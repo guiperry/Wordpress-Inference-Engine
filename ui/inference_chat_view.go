@@ -105,8 +105,9 @@ func (v *InferenceChatView) handleSendMessage() { // <-- Renamed handler
 	go func() {
 		defer progress.Hide()
 
-		// --- Call ONLY GenerateText ---
-		response, err := v.inferenceService.GenerateText(prompt)
+		// Call GenerateText with empty modelName and instructionText
+		// The DelegatorService will use its default primary model.
+		response, err := v.inferenceService.GenerateText("", prompt, "")
 
 		if err != nil {
 			log.Printf("UI Error: Chat generation failed: %v", err)

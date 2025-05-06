@@ -13,7 +13,7 @@ type ConversationMemory interface {
 	AddMessage(message gollm_types.MemoryMessage)
 	// GetMessagesForContext retrieves messages relevant to the current context,
 	// respecting a maximum token limit.
-	GetMessagesForContext(maxTokens int) []gollm_types.MemoryMessage
+	GetMessagesForContext(maxTokens int, modelName string) []gollm_types.MemoryMessage
 	// Clear removes all messages from the history.
 	Clear()
 	// GetHistory returns all messages in the history (for inspection).
@@ -24,15 +24,15 @@ type ConversationMemory interface {
 // based on estimated token count.
 type SimpleWindowMemory struct {
 	messages  []gollm_types.MemoryMessage
-	modelName string
+	defaultModelName string // Used if no specific model is provided to GetMessagesForContext
 	mu        sync.RWMutex
 }
 
 // NewSimpleWindowMemory creates a new SimpleWindowMemory.
-func NewSimpleWindowMemory(modelName string) *SimpleWindowMemory {
+func NewSimpleWindowMemory(defaultModelName string) *SimpleWindowMemory {
 	return &SimpleWindowMemory{
 		messages:  make([]gollm_types.MemoryMessage, 0),
-		modelName: modelName,
+		defaultModelName: defaultModelName,
 	}
 }
 
@@ -45,17 +45,22 @@ func (m *SimpleWindowMemory) AddMessage(message gollm_types.MemoryMessage) {
 }
 
 // GetMessagesForContext returns the most recent messages that fit within maxTokens.
-func (m *SimpleWindowMemory) GetMessagesForContext(maxTokens int) []gollm_types.MemoryMessage {
+// modelName parameter specifies the model to use for token estimation for this context.
+func (m *SimpleWindowMemory) GetMessagesForContext(maxTokens int, modelName string) []gollm_types.MemoryMessage {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var currentTokens int
 	var contextMessages []gollm_types.MemoryMessage
 
+	estimationModel := m.defaultModelName
+	if modelName != "" {
+		estimationModel = modelName
+	}
 	// Iterate backwards from the most recent message
 	for i := len(m.messages) - 1; i >= 0; i-- {
 		msg := m.messages[i]
-		msgTokens := estimateTokens(msg.Content, m.modelName) // Use model-specific token counting
+		msgTokens := estimateTokens(msg.Content, estimationModel) // Use specified or default model for token counting
 
 		if currentTokens+msgTokens <= maxTokens {
 			// Prepend the message to maintain chronological order in the result

@@ -2,7 +2,7 @@ module Inference_Engine
 
 go 1.23.1
 
-replace github.com/teilomillet/gollm => github.com/guiperry/gollm_cerebras v0.0.0-20250428212219-79db8046e37b
+replace github.com/teilomillet/gollm => github.com/guiperry/gollm_cerebras v0.0.0-20250503062947-af02caade013
 
 require (
 	fyne.io/fyne/v2 v2.5.5

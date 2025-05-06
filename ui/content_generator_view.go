@@ -4,15 +4,19 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"Inference_Engine/inference"
+	"Inference_Engine/utils"
 	"Inference_Engine/wordpress"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -30,6 +34,8 @@ type ContentGeneratorView struct {
 
 	// Generation UI elements
 	promptEntry      *widget.Entry
+	instructionEntry *widget.Entry
+	selectedModel    *widget.Select
 	generateButton   *widget.Button
 	resultOutput     *widget.Entry
 	saveToFileButton *widget.Button
@@ -38,6 +44,17 @@ type ContentGeneratorView struct {
 	// Data
 	sourceContents      []SourceContent
 	selectedSourceIndex int
+
+	// Generation state
+	isGenerating        bool
+	generationMutex     sync.Mutex
+	dialogMutex         sync.Mutex
+
+	// UI components
+	customProgressDialog dialog.Dialog
+	generationLogRelay   *utils.LogRelay
+	generationLogDisplay *widget.Label
+	logger               *log.Logger
 }
 
 // SourceContent represents a source content item
@@ -57,8 +74,12 @@ func NewContentGeneratorView(wpService *wordpress.WordPressService, inferenceSer
 		window:              window,
 		sourceContents:      []SourceContent{},
 		selectedSourceIndex: -1,
+		isGenerating:        false,
+		logger:              log.New(os.Stderr, "ContentGeneratorView: ", log.LstdFlags|log.Lshortfile),
 	}
 	view.initialize()
+	view.refreshAvailableModels() // Initial population of models
+	
 	return view
 }
 
@@ -119,9 +140,21 @@ func (v *ContentGeneratorView) initialize() {
 	v.promptEntry.Wrapping = fyne.TextWrapWord
 	v.promptEntry.SetMinRowsVisible(10) // <--- Add this line
 
+	v.instructionEntry = widget.NewMultiLineEntry()
+	v.instructionEntry.SetPlaceHolder("Enter specific instructions for the AI (optional)...")
+	v.instructionEntry.Wrapping = fyne.TextWrapWord
+	v.instructionEntry.SetMinRowsVisible(3)
+
+	// Initialize selectedModel with empty options, will be populated by refreshAvailableModels
+	v.selectedModel = widget.NewSelect([]string{"Loading models..."}, func(selected string) {
+		log.Printf("ContentGeneratorView: Model selected: %s", selected)
+	})
+	v.refreshAvailableModels() // Populate models
+
 	v.generateButton = widget.NewButton("Generate Content", func() {
 		v.generateContent()
 	})
+
 
 	v.resultOutput = widget.NewMultiLineEntry()
 	v.resultOutput.SetPlaceHolder("Generated content will appear here...")
@@ -136,12 +169,19 @@ func (v *ContentGeneratorView) initialize() {
 		container.NewScroll(v.sourceList),
 	)
 
+	// --- Enhanced Prompt Area with Model and Instructions ---
+	generationSettingsForm := widget.NewForm(
+		widget.NewFormItem("Model:", v.selectedModel),
+		widget.NewFormItem("Instructions:", v.instructionEntry),
+		widget.NewFormItem("Prompt/Request:", v.promptEntry),
+	)
+
 	promptContainer := container.NewBorder(
-		widget.NewLabel("Prompt:"),         // Top
-		v.generateButton,                   // Bottom
-		nil,                                // Left
-		nil,                                // Right
-		container.NewScroll(v.promptEntry), // Center - Scroll expands
+		widget.NewLabel("Generation Settings:"), // Top
+		v.generateButton,                        // Bottom
+		nil,                                     // Left
+		nil,                                     // Right
+		container.NewScroll(generationSettingsForm), // Center - Scroll expands
 	)
 
 	// Create save buttons
@@ -223,6 +263,23 @@ func (v *ContentGeneratorView) ClearSourceContents() {
 	v.removeSourceButton.Disable()
 }
 
+// refreshAvailableModels populates the model selection dropdown.
+func (v *ContentGeneratorView) refreshAvailableModels() {
+	if v.inferenceService == nil {
+		v.selectedModel.Options = []string{"Service unavailable"}
+		v.selectedModel.Refresh()
+		return
+	}
+	primaryModels := v.inferenceService.GetPrimaryModels()
+	fallbackModels := v.inferenceService.GetFallbackModels()
+	allModels := append(primaryModels, fallbackModels...)
+	if len(allModels) == 0 {
+		allModels = []string{"No models available"}
+	}
+	v.selectedModel.Options = allModels
+	v.selectedModel.SetSelectedIndex(0) // Select the first model by default
+	v.selectedModel.Refresh()
+}
 // showAddSourceDialog shows a dialog to add a source file
 func (v *ContentGeneratorView) showAddSourceDialog() {
 	// Create a file dialog
@@ -235,29 +292,31 @@ func (v *ContentGeneratorView) showAddSourceDialog() {
 			// User cancelled
 			return
 		}
-		
+
 		// Show progress dialog
 		progress := dialog.NewProgressInfinite("Loading", "Loading file content...", v.window)
 		progress.Show()
-		
+
 		// Process file in a goroutine
 		go func() {
 			defer reader.Close()
-			
-			// Read file content
-			content, err := io.ReadAll(reader)
-			
+			defer progress.Hide()
 			// Hide progress dialog
-			progress.Hide()
+			// Progress dialog is handled by the main defer
 			
 			if err != nil {
 				dialog.ShowError(fmt.Errorf("failed to read file: %w", err), v.window)
 				return
 			}
-			
+
+			// Read file content
+			content, err := io.ReadAll(reader) // Moved after defer progress.Hide()
+			if err != nil { // Check error from ReadAll
+				dialog.ShowError(fmt.Errorf("failed to read file content: %w", err), v.window)
+				return
+			}
 			// Get file name from URI
 			fileName := reader.URI().Name()
-			
 			// Add to source contents
 			v.AddSourceContent(
 				fileName,
@@ -266,7 +325,7 @@ func (v *ContentGeneratorView) showAddSourceDialog() {
 				-1, // No WordPress ID for files
 				false, 
 			)
-			
+
 			dialog.ShowInformation("Success", fmt.Sprintf("Added file '%s' to source content", fileName), v.window)
 		}()
 	}, v.window)
@@ -274,6 +333,33 @@ func (v *ContentGeneratorView) showAddSourceDialog() {
 
 // generateContent generates content based on source content and prompt
 func (v *ContentGeneratorView) generateContent() {
+	v.generationMutex.Lock()
+	if v.isGenerating {
+		v.generationMutex.Unlock()
+		dialog.ShowInformation("In Progress", "A content generation task is already running.", v.window)
+		return
+	}
+	v.isGenerating = true
+	v.generationMutex.Unlock()
+
+	// Ensure isGenerating is reset, log relay stopped, and dialog hidden when done.
+	defer func() {
+		v.generationMutex.Lock()
+		v.isGenerating = false
+		v.generationMutex.Unlock()
+
+		if v.generationLogRelay != nil {
+			v.generationLogRelay.Stop()
+		}
+
+		v.dialogMutex.Lock()
+		if v.customProgressDialog != nil {
+			v.customProgressDialog.Hide()
+			v.customProgressDialog = nil
+		}
+		v.dialogMutex.Unlock()
+	}()
+
 	// Validate inputs
 	if len(v.sourceContents) == 0 {
 		dialog.ShowError(fmt.Errorf("no source content available"), v.window)
@@ -285,10 +371,48 @@ func (v *ContentGeneratorView) generateContent() {
 		dialog.ShowError(fmt.Errorf("prompt cannot be empty"), v.window)
 		return
 	}
+	instructionText := v.instructionEntry.Text
+	selectedModelName := v.selectedModel.Selected
+	if selectedModelName == "" || selectedModelName == "No models available" || selectedModelName == "Service unavailable" {
+		dialog.ShowError(fmt.Errorf("please select a valid model"), v.window)
+		return
+	}
+
+	// Setup progress dialog with log viewer
+	v.dialogMutex.Lock()
+	// Deferring unlock here might be problematic if Show() blocks or another dialog is shown.
+	// Let's unlock after Show() or manage it more carefully.
 	
-	// Show progress dialog
-	progress := dialog.NewProgressInfinite("Generating", "Generating content with AI...", v.window)
-	progress.Show()
+	if v.customProgressDialog != nil {
+		v.customProgressDialog.Hide()
+	}
+
+	v.generationLogDisplay.SetText("Initializing generation process...\n")
+
+	v.generationLogRelay = utils.NewLogRelay(func(logText string) {
+		if v.window.Canvas() != nil { // Check if canvas is valid
+			// Fyne typically handles marshalling widget updates to the main thread.
+			v.generationLogDisplay.SetText(logText)
+		}
+	})
+	v.generationLogRelay.Start()
+
+	progressBar := widget.NewProgressBarInfinite()
+	logScroll := container.NewVScroll(v.generationLogDisplay)
+	logScroll.SetMinSize(fyne.NewSize(450, 200))
+
+	dialogContent := container.NewVBox(
+		widget.NewLabelWithStyle("Generating Content with AI...", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		progressBar,
+		widget.NewSeparator(),
+		container.NewHBox(widget.NewIcon(theme.InfoIcon()), widget.NewLabel("Backend Activity:")),
+		logScroll,
+	)
+
+	v.customProgressDialog = dialog.NewCustom("Generation in Progress", "Dismiss", dialogContent, v.window)
+	v.customProgressDialog.SetDismissText("Please Wait")
+	v.customProgressDialog.Show()
+	v.dialogMutex.Unlock() // Unlock after showing the dialog
 	
 	// Generate content in a goroutine
 	go func() {
@@ -323,7 +447,6 @@ func (v *ContentGeneratorView) generateContent() {
 
 		// Check if there are any true sources if generation requires them
 		if trueCount == 0 {
-			progress.Hide()
 			dialog.ShowError(fmt.Errorf("cannot generate content without at least one 'True Source' (uncheck 'Sample' for factual sources)"), v.window)
 			return
 		}
@@ -337,12 +460,10 @@ func (v *ContentGeneratorView) generateContent() {
 		)
 		// --- End Use New Prompt ---
 
-		
+		v.logger.Printf("ContentGeneratorView: Sending to LLM. Model: %s, Instruction Length: %d, Final Prompt Length: %d", selectedModelName, len(instructionText), len(finalPrompt))
 		// Call the inference service
-		generatedContent, err := v.inferenceService.GenerateText(finalPrompt) // Use the combined prompt
-		
-		// Hide progress dialog
-		progress.Hide()
+		// Call the inference service with the final prompt
+		generatedContent, err := v.inferenceService.GenerateText(selectedModelName, finalPrompt, instructionText)
 		
 		if err != nil {
 			dialog.ShowError(fmt.Errorf("failed to generate content: %w", err), v.window)

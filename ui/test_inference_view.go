@@ -135,8 +135,9 @@ func (v *TestInferenceView) handleFallbackTest() {
 
 	go func() {
 		defer progress.Hide()
-		// Call the standard GenerateText - the delegator handles the fallback
-		response, err := v.inferenceService.GenerateText(oversizedPrompt) // Use standard GenerateText
+		// Call GenerateText with empty modelName and instructionText
+		// to trigger default primary/fallback logic in DelegatorService.
+		response, err := v.inferenceService.GenerateText("", oversizedPrompt, "")
 
 		if err != nil {
 			log.Printf("UI Error: Fallback test failed: %v", err)
