@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 
+	"sync" // Import sync package
 	"Inference_Engine/inference"
 	"Inference_Engine/wordpress"
 
@@ -38,6 +39,7 @@ type ContentManagerView struct {
 
 	// Reference to content generator view (will be set after creation)
 	contentGeneratorView *ContentGeneratorView
+	dialogMutex          sync.Mutex // ADDED: Mutex for dialog operations
 }
 
 // RefreshStatus updates the status label based on the current service connection state.
@@ -426,8 +428,11 @@ func (v *ContentManagerView) loadPagePreview(pageURL string) {
 	}
 
 	// Show progress indicator
+	v.dialogMutex.Lock() // Lock before showing dialog
 	progress := dialog.NewProgressInfinite("Loading Preview", "Capturing page screenshot...", v.window)
 	progress.Show()
+	v.dialogMutex.Unlock() // Unlock after showing
+
 	v.previewImage.Resource = nil // Clear previous image while loading
 	v.previewImage.Refresh()
 
@@ -437,12 +442,16 @@ func (v *ContentManagerView) loadPagePreview(pageURL string) {
 
 		imgBytes, err := v.wpService.GetPageScreenshot(pageURL)
 		// Hide progress *before* potentially showing an error dialog.
+
+		v.dialogMutex.Lock() // Lock before hiding/showing next dialog
 		progress.Hide()
 		if err != nil {
 			log.Printf("Error getting page screenshot: %v", err)
 			dialog.ShowError(fmt.Errorf("failed to load preview for %s: %w", pageURL, err), v.window)
+			v.dialogMutex.Unlock() // Unlock after showing error
 			v.previewImage.Resource = nil // Ensure image is cleared on error
 			v.previewImage.Refresh()
+
 			return
 		}
 
@@ -450,6 +459,8 @@ func (v *ContentManagerView) loadPagePreview(pageURL string) {
 		imgResource := fyne.NewStaticResource(fmt.Sprintf("preview_%d.png", v.selectedPageID), imgBytes) // Use PNG if GetPageScreenshot returns PNG
 
 		// Update the image widget
+		// Unlock here if no error occurred
+		v.dialogMutex.Unlock()
 		v.previewImage.Resource = imgResource
 		v.previewImage.Refresh()
 	}()
