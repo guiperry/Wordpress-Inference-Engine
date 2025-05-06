@@ -169,7 +169,7 @@ func (v *TestInferenceView) handleMOATest() {
 	go func() {
 		defer progress.Hide()
 		// Call the specific MOA generation method
-		response, err := v.inferenceService.GenerateTextWithMOA(testPrompt) // Use GenerateTextWithMOA
+		response, err := v.inferenceService.GenerateTextWithMOA(testPrompt, "") // Pass empty instruction
 
 		if err != nil {
 			log.Printf("UI Error: MOA test failed: %v", err)

@@ -240,8 +240,8 @@ func (s *InferenceService) GenerateTextWithProvider(providerName string, promptT
 }
 
 // --- ADDED: GenerateTextWithMOA ---
-// GenerateTextWithMOA directly delegates to the MOA instance for testing.
-func (s *InferenceService) GenerateTextWithMOA(promptText string) (string, error) {
+// GenerateTextWithMOA directly delegates to the MOA instance.
+func (s *InferenceService) GenerateTextWithMOA(promptText string, instructionText string) (string, error) {
 	s.mutex.Lock()
 	if !s.isRunning {
 		s.mutex.Unlock()
@@ -255,9 +255,15 @@ func (s *InferenceService) GenerateTextWithMOA(promptText string) (string, error
 	s.mutex.Unlock()
 
 	ctx := context.Background() // Consider allowing context passing
-	log.Println("InferenceService: Delegating direct generation request to MOA...")
+	log.Printf("InferenceService: Delegating generation request to MOA. Instruction: '%s'", instructionText)
+
+	combinedPrompt := promptText
+	if instructionText != "" {
+		combinedPrompt = "Instructions:\n" + instructionText + "\n\n---\n\n" + promptText
+	}
+
 	// Note: MOA's Generate might have its own internal timeouts based on AgentTimeout
-	response, err := moaInstance.Generate(ctx, promptText)
+	response, err := moaInstance.Generate(ctx, combinedPrompt)
 	if err != nil {
 		log.Printf("InferenceService: Direct MOA generation failed: %v", err)
 		return "", fmt.Errorf("MOA generation failed: %w", err)

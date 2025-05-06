@@ -271,13 +271,51 @@ func (v *ContentGeneratorView) refreshAvailableModels() {
 		return
 	}
 	primaryModels := v.inferenceService.GetPrimaryModels()
+	moaPrimaryDefault := v.inferenceService.GetProxyModel() // MOA's default primary
 	fallbackModels := v.inferenceService.GetFallbackModels()
-	allModels := append(primaryModels, fallbackModels...)
+	moaFallbackDefault := v.inferenceService.GetBaseModel() // MOA's default fallback/aggregator
+
+	// Combine unique model names, ensuring MOA defaults are listed if available
+	modelSet := make(map[string]struct{})
+	allModels := []string{"MOA (Mixture of Agents)"} // Add MOA as the first option
+	if moaPrimaryDefault != "" {
+		modelSet[moaPrimaryDefault] = struct{}{}
+	}
+	if moaFallbackDefault != "" {
+		modelSet[moaFallbackDefault] = struct{}{}
+	}
+	modelSet[allModels[0]] = struct{}{}
+
+	for _, model := range append(primaryModels, fallbackModels...) {
+		if _, exists := modelSet[model]; !exists {
+			allModels = append(allModels, model)
+			modelSet[model] = struct{}{}
+		}
+	}
+
 	if len(allModels) == 0 {
 		allModels = []string{"No models available"}
 	}
 	v.selectedModel.Options = allModels
-	v.selectedModel.SetSelectedIndex(0) // Select the first model by default
+	// Set default selection to MOA if available, otherwise the first actual model
+	selectedIndex := 0 // Default to MOA
+	if len(allModels) > 1 && allModels[0] != "MOA (Mixture of Agents)" { // Should not happen with current logic
+		// Fallback if MOA wasn't added first for some reason
+		for i, model := range allModels {
+			if model == moaPrimaryDefault {
+				selectedIndex = i
+				break
+			}
+		}
+	} else if len(allModels) == 1 && allModels[0] != "MOA (Mixture of Agents)" {
+		// If only "No models available" or a single non-MOA model
+		selectedIndex = 0
+	}
+
+	if selectedIndex >= len(allModels) { // Safety check
+		selectedIndex = 0
+	}
+	v.selectedModel.SetSelectedIndex(selectedIndex)
 	v.selectedModel.Refresh()
 }
 // showAddSourceDialog shows a dialog to add a source file
@@ -462,8 +500,13 @@ func (v *ContentGeneratorView) generateContent() {
 
 		v.logger.Printf("ContentGeneratorView: Sending to LLM. Model: %s, Instruction Length: %d, Final Prompt Length: %d", selectedModelName, len(instructionText), len(finalPrompt))
 		// Call the inference service
-		// Call the inference service with the final prompt
-		generatedContent, err := v.inferenceService.GenerateText(selectedModelName, finalPrompt, instructionText)
+		var generatedContent string
+		var err error
+		if selectedModelName == "MOA (Mixture of Agents)" {
+			generatedContent, err = v.inferenceService.GenerateTextWithMOA(finalPrompt, instructionText)
+		} else {
+			generatedContent, err = v.inferenceService.GenerateText(selectedModelName, finalPrompt, instructionText)
+		}
 		
 		if err != nil {
 			dialog.ShowError(fmt.Errorf("failed to generate content: %w", err), v.window)
