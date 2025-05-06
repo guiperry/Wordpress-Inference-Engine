@@ -8,6 +8,9 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time" // Import time package
+
+
 )
 
 // ChunkingStrategy defines how to split the text.
@@ -383,23 +386,19 @@ func (cm *ContextManager) processSequentially(ctx context.Context, llm TextGener
 
 	chunkIndex := 0
 
-	// Estimate tokens for the base instruction
-	instructionTokens := estimateTokens(instructionPerChunk, cm.modelName)
-
 	for remainingText != "" {
 		chunkIndex++
-		// Construct prompt for this chunk, including original instruction and summary context
+		// Estimate tokens for the base instruction and current summary
+		instructionTokens := estimateTokens(instructionPerChunk, cm.modelName)
+		summaryTokens := estimateTokens(previousOutputSummary, cm.modelName)
+		contextTokens := instructionTokens + summaryTokens
 		var chunkPrompt string
 		var currentChunk string
 
 		// Calculate tokens used by instruction and summary
-		summaryTokens := estimateTokens(previousOutputSummary, cm.modelName)
-		contextTokens := instructionTokens + summaryTokens
+		summaryTokens = estimateTokens(previousOutputSummary, cm.modelName) // Use =
+		contextTokens = instructionTokens + summaryTokens                   // Use =
 
-		// Calculate remaining budget for the *content* of the next chunk
-		// We need the LLM's actual context limit. Using maxChunkSize as a proxy for now,
-		// but this should ideally be the model's actual limit.
-		// A small buffer (e.g., 50 tokens) is added for safety/formatting.
 		contentBudget := cm.maxChunkSize - contextTokens - 50
 		if contentBudget <= 0 {
 			log.Printf("ContextManager: Warning - No token budget left for chunk %d content after context/instruction. Context Tokens: %d", chunkIndex, contextTokens)
@@ -408,10 +407,22 @@ func (cm *ContextManager) processSequentially(ctx context.Context, llm TextGener
 			contentBudget = 50 // Arbitrary small budget
 		}
 
-		// Simple chunking implementation - split at nearest whitespace within budget
-		chunkEnd := min(contentBudget, len(remainingText))
-		currentChunk = remainingText[:chunkEnd]
-		remainingText = remainingText[chunkEnd:]
+		// Extract the next chunk based on the budget
+		// Find the best split point (e.g., end of sentence or paragraph) within the budget
+		chunkEndIndex := findSplitIndex(remainingText, contentBudget, cm.modelName)
+		if chunkEndIndex <= 0 {
+			// If no good split point found within budget, or budget is too small, take the whole remaining text or up to budget limit
+			chunkEndIndex = min(len(remainingText), contentBudget*5) // Use a multiplier as budget is tokens, not chars
+			if chunkEndIndex == 0 && len(remainingText) > 0 {
+				// Force taking at least some characters if budget was effectively zero
+				chunkEndIndex = min(len(remainingText), 100)
+			}
+			log.Printf("ContextManager: Using fallback split index %d for chunk %d", chunkEndIndex, chunkIndex)
+		}
+
+		currentChunk = strings.TrimSpace(remainingText[:chunkEndIndex])
+		remainingText = strings.TrimSpace(remainingText[chunkEndIndex:])
+
 
 		if currentChunk == "" && remainingText != "" {
 			log.Printf("ContextManager: Warning - Could not extract next chunk within budget for chunk %d.", chunkIndex)
@@ -421,11 +432,17 @@ func (cm *ContextManager) processSequentially(ctx context.Context, llm TextGener
 
 		log.Printf("ContextManager: Processing chunk %d sequentially (Content Budget: %d tokens)...", chunkIndex, contentBudget)
 
-		if chunkIndex == 0 {
-			// First chunk - no previous context
-			// Initialize any first-chunk specific variables here
+		// Construct the prompt for the current chunk
+		promptBuilder := strings.Builder{}
+		promptBuilder.WriteString(instructionPerChunk)
+		if previousOutputSummary != "" {
+			promptBuilder.WriteString("\n\nContext from previous section:\n")
+			promptBuilder.WriteString(previousOutputSummary)
 		}
-
+		promptBuilder.WriteString("\n\n---\nCurrent Section:\n")
+		promptBuilder.WriteString(currentChunk)
+		promptBuilder.WriteString("\n---")
+		chunkPrompt = promptBuilder.String()
 		// --- Add logging for the prompt being sent ---
 
 		log.Printf("ContextManager: Sequential Prompt for Chunk %d:\n%s\n", chunkIndex, chunkPrompt)
@@ -443,11 +460,22 @@ func (cm *ContextManager) processSequentially(ctx context.Context, llm TextGener
 		}
 
 		results = append(results, result)
+		log.Printf("ContextManager: Chunk %d processed.", chunkIndex)
 
+		// Generate summary *after* getting the result
+		previousOutputSummary = cm.summarizeForContext(result, cm.contextTokenBudget)
 		log.Printf("ContextManager: Generated summary for next chunk context: %s", previousOutputSummary)
-	}
 
-	log.Printf("ContextManager: Chunk %d processed.", chunkIndex)
+		// --- Conditional Delay ---
+		if adapter, ok := llm.(*LLMAdapter); ok { // Check if it's our adapter
+			// Access the underlying gollm LLM and its provider
+			if adapter.ProviderName != "" { // Check if provider name is available
+				log.Printf("ContextManager: Adding 10s delay after chunk %d (Provider: %s)...", chunkIndex, adapter.ProviderName)
+				time.Sleep(10 * time.Second) // Apply delay
+			}
+		}
+		// --- END Conditional Delay ---
+	} // End of loop through remainingText
 	return strings.Join(results, "\n\n---\n\n"), nil
 }
 
@@ -459,6 +487,7 @@ func (cm *ContextManager) summarizeForContext(text string, budget int) string {
 	if budget <= 0 {
 		return "" // No budget, no summary
 	}
+	text = strings.TrimSpace(text) // Trim input text first
 
 	// Split into sentences (or potentially words/tokens for finer control)
 	sentenceRegex := regexp.MustCompile(`[.!?]\s+`)
@@ -474,26 +503,78 @@ func (cm *ContextManager) summarizeForContext(text string, budget int) string {
 		if sentence == "" {
 			continue
 		}
+		// Add back punctuation for context
+		originalIndex := strings.LastIndex(text, sentence) // Find last occurrence in original text
+		if originalIndex != -1 && originalIndex+len(sentence) < len(text) {
+			punctuation := text[originalIndex+len(sentence)]
+			if punctuation == '.' || punctuation == '!' || punctuation == '?' {
+				sentence += string(punctuation)
+			}
+		}
 		// Estimate tokens for the sentence (add 1 for potential space)
 		sentenceTokens := estimateTokens(sentence, cm.modelName) + 1
 
 		if currentTokens+sentenceTokens <= budget {
-			summarySentences = append(summarySentences, sentence) // Add sentence to the beginning of our list (effectively reversing)
-			currentTokens += sentenceTokens
+			summarySentences = append(summarySentences, sentence) // Add sentence
+			currentTokens += sentenceTokens // Accumulate tokens *only* if sentence is added
+		} else {
+			// Stop adding sentences once budget is exceeded
+			break
 		}
-	}
+	} // End of loop iterating backwards through sentences
 
-	// The summarySentences slice was built by appending sentences from the end backwards.
-	// We need to reverse this slice to get the correct chronological order.
+	// Reverse the collected sentences to restore chronological order
 	for i, j := 0, len(summarySentences)-1; i < j; i, j = i+1, j-1 {
 		summarySentences[i], summarySentences[j] = summarySentences[j], summarySentences[i]
 	}
 
-	// Join the sentences with spaces (they're already in correct order)
+	// Join the sentences (now in correct order)
 	if len(summarySentences) == 0 {
 		return ""
 	}
 	return strings.Join(summarySentences, " ")
+}
+
+// findSplitIndex finds a suitable index to split the text within the token budget.
+// It prioritizes paragraph breaks, then sentence breaks.
+func findSplitIndex(text string, tokenBudget int, modelName string) int {
+	if estimateTokens(text, modelName) <= tokenBudget {
+		return len(text) // Whole text fits
+	}
+
+	bestSplit := -1
+	currentTokens := 0
+
+	// Iterate through characters, estimating tokens and looking for good split points
+	// This is approximate; a more robust method would use actual tokenization.
+	for i := 0; i < len(text); i++ {
+		// Estimate tokens incrementally (very rough)
+		if i%4 == 0 { // Estimate 1 token every 4 chars
+			currentTokens++
+		}
+
+		if currentTokens > tokenBudget {
+			// We've exceeded the budget, return the last good split point found
+			if bestSplit > 0 {
+				return bestSplit
+			}
+			// If no good split found, return the index just before exceeding budget
+			return max(0, i-1) // Ensure non-negative index
+		}
+
+		// Check for preferred split points (double newline, then sentence end)
+		if i > 0 && text[i] == '\n' && text[i-1] == '\n' {
+			bestSplit = i + 1 // Split after double newline
+		} else if bestSplit == -1 && (text[i] == '.' || text[i] == '!' || text[i] == '?') {
+			// If no paragraph break found yet, consider sentence end
+			if i+1 < len(text) && (text[i+1] == ' ' || text[i+1] == '\n') {
+				bestSplit = i + 1 // Split after punctuation and space/newline
+			}
+		}
+	}
+
+	// If loop finishes, the whole text fits (should have been caught earlier)
+	return len(text)
 }
 
 // ProcessLargePromptWithStrategy processes a large prompt with a specific chunking strategy,
@@ -574,3 +655,19 @@ func (cm *ContextManager) SetChunkOverlap(overlap int) {
 // func (cm *ContextManager) GetInferenceService() TextGenerator {
 // 	return cm.inferenceService
 // }
+
+// Helper min function
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// Helper max function
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

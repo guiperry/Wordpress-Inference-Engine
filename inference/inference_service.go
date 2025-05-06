@@ -287,7 +287,7 @@ func (s *InferenceService) GenerateTextWithContextManager(promptText, instructio
 	log.Printf("InferenceService: Explicitly calling ContextManager with provider %s", llmProviderName)
 	// Adapt llmInstance to TextGenerator interface if needed
 	// Wrap the LLM in our adapter to implement TextGenerator
-	wrappedLLM := &LLMAdapter{LLM: llmInstance}
+	wrappedLLM := &LLMAdapter{LLM: llmInstance, ProviderName: llmProviderName} // Pass ProviderName
 	return ctxMgr.ProcessLargePrompt(ctx, wrappedLLM, promptText, instruction)
 }
 

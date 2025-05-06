@@ -176,7 +176,7 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, messa
 
 		fullPromptForChunking := formatMessagesToPrompt(messages)
 		chunkInstruction := "Process the following section of text:" // Adjust as needed
-		wrappedLLM := &LLMAdapter{LLM: chunkingLLM}
+		wrappedLLM := &LLMAdapter{LLM: chunkingLLM, ProviderName: chunkingModelName} // Pass ProviderName
 
 		chunkedResponse, chunkErr := d.contextManager.ProcessLargePrompt(ctx, wrappedLLM, fullPromptForChunking, chunkInstruction)
 		if chunkErr == nil {
@@ -243,7 +243,7 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, messa
 					chunkInstruction := "Process the following section of text:" // Adjust as needed
 
 					// Call the context manager
-					wrappedLLM := &LLMAdapter{LLM: chunkingLLM}
+					wrappedLLM := &LLMAdapter{LLM: chunkingLLM, ProviderName: attempt.Config.ProviderName} // Pass ProviderName
 					chunkedResponse, chunkErr := d.contextManager.ProcessLargePrompt(ctx, wrappedLLM, fullPromptForChunking, chunkInstruction)
 					if chunkErr == nil {
 						log.Printf("DelegatorService (%s): REACTIVE ContextManager chunking successful with %s.", operationName, targetName)
@@ -288,10 +288,11 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, messa
 		// Find the Deepseek instance (or another designated chunking LLM for the final fallback)
 		var chunkingLLM llm.LLM
 		for _, attempt := range d.fallbackAttempts { // Search fallbacks first
-			if attempt.Config.ProviderName == "deepseek" { // Explicitly look for Deepseek for this final fallback
+			// Use the first fallback LLM found for the final attempt
+			if attempt.Instance != nil {
 				chunkingLLM = attempt.Instance
-				log.Printf("DelegatorService (%s): Found Deepseek LLM for final chunking fallback.", operationName)
-				break
+				log.Printf("DelegatorService (%s): Found LLM '%s' from provider '%s' for final chunking fallback.", operationName, attempt.Config.ModelName, attempt.Config.ProviderName)
+				break // Use the first one found
 			}
 		}
 		// Could add searching primaryAttempts if not found in fallback
@@ -303,7 +304,14 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, messa
 			chunkInstruction := "Process the following section of text:" // Adjust as needed
 
 			// Call the context manager with wrapped LLM
-			wrappedLLM := &LLMAdapter{LLM: chunkingLLM}
+			// Find the provider name for the selected chunkingLLM
+			providerName := "unknown"
+			for _, attempt := range d.fallbackAttempts { // Search again to get the name
+				if attempt.Instance == chunkingLLM { providerName = attempt.Config.ProviderName; break }
+			}
+			// If not found in fallback, check primary (though unlikely path)
+			if providerName == "unknown" { for _, attempt := range d.primaryAttempts { if attempt.Instance == chunkingLLM { providerName = attempt.Config.ProviderName; break } } }
+			wrappedLLM := &LLMAdapter{LLM: chunkingLLM, ProviderName: providerName} // Pass ProviderName
 			chunkedResponse, chunkErr := d.contextManager.ProcessLargePrompt(ctx, wrappedLLM, fullPromptForChunking, chunkInstruction)
 			if chunkErr == nil {
 				log.Printf("DelegatorService (%s): FINAL ContextManager chunking fallback successful.", operationName)
@@ -315,7 +323,7 @@ func (d *DelegatorService) executeGenerationWithRetry(ctx context.Context, messa
 			// If chunking also fails, return its error wrapped with the original context
 			return "", fmt.Errorf("%s failed after all attempts including final chunking, chunking error: %w (original error: %v)", operationName, chunkErr, lastError)
 		}
-		log.Printf("DelegatorService (%s): Context error detected, but designated final chunking LLM (Deepseek) not found/configured.", operationName)
+		log.Printf("DelegatorService (%s): Context error detected, but no suitable LLM found/configured for final chunking fallback.", operationName)
 	}
 	// --- End FINAL FALLBACK ---
 

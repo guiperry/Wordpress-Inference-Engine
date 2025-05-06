@@ -8,6 +8,7 @@ import (
 // LLMAdapter wraps an llm.LLM instance to implement the TextGenerator interface
 type LLMAdapter struct {
 	LLM llm.LLM
+	ProviderName string // ADDED: Store the provider name
 }
 
 // GenerateText implements the TextGenerator interface

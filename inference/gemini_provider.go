@@ -9,6 +9,7 @@ import (
 	"net/http" // Import net/http package
 	"strings"
 	"sync"
+	"time" 
 
 	// Import Google's Gemini client library
 	// "github.com/google/generative-ai-go/genai" // REMOVE genai client import
@@ -97,7 +98,9 @@ func NewGeminiProvider(apiKey, model string, extraHeaders map[string]string) pro
 		model:        model,
 		maxTokens:    1024,
 		extraHeaders: make(map[string]string),
-		client:       &http.Client{}, // Initialize standard HTTP client
+		client:       &http.Client{
+			Timeout: 120 * time.Second, // Set timeout (e.g., 120 seconds)
+		}, // Initialize standard HTTP client
 		logger:       utils.NewLogger(utils.LogLevelInfo),
 	}
 
