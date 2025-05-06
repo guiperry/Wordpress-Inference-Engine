@@ -25,13 +25,13 @@ func (t *HighContrastTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVa
 		return color.White
 	case theme.ColorNameButton:
 		// Darker Purple for standard buttons
-		return color.NRGBA{R: 0x6a, G: 0x1b, B: 0x9a, A: 0xff}
+		return color.NRGBA{R: 0x00, G: 0x80, B: 0x80, A: 0xff} // Teal
 	case theme.ColorNamePrimary:
 		// Brighter Purple for important buttons/accents
-		return color.NRGBA{R: 0x8a, G: 0x2b, B: 0xe2, A: 0xff} // BlueViolet
+		return color.NRGBA{R: 0x20, G: 0xb2, B: 0xaa, A: 0xff} // LightSeaGreen
 	case theme.ColorNameHover:
 		// Slightly lighter purple for hover
-		return color.NRGBA{R: 0x7b, G: 0x1f, B: 0xae, A: 0xff}
+		return color.NRGBA{R: 0x00, G: 0x8b, B: 0x8b, A: 0xff} // DarkCyan
 	case theme.ColorNamePlaceHolder:
 		// Slightly dimmer white for placeholder text
 		return color.NRGBA{R: 0xcc, G: 0xcc, B: 0xcc, A: 0xff}
